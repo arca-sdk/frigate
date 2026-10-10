@@ -46,6 +46,14 @@ logger = logging.getLogger(__name__)
 RECORD_GRACE_SECONDS = 90
 
 
+@dataclass
+class FrameTime:
+    """Time of the last frame read, written by the capture thread and read by
+    the watchdog thread of the same process."""
+
+    value: float = 0.0
+
+
 def capture_frames(
     ffmpeg_process: sp.Popen[Any],
     config: CameraConfig,
@@ -56,7 +64,7 @@ def capture_frames(
     frame_queue,
     fps: Value,
     skipped_fps: Value,
-    current_frame: Value,
+    current_frame: FrameTime,
     stop_event: MpEvent,
 ) -> None:
     frame_size = frame_shape[0] * frame_shape[1]
@@ -138,7 +146,7 @@ class CameraWatchdog(threading.Thread):
         self,
         config: CameraConfig,
         shm_frame_count: int,
-        frame_queue: Queue,
+        frame_queue: "Queue | queue.Queue",
         camera_fps,
         skipped_fps,
         ffmpeg_pid,
@@ -146,9 +154,14 @@ class CameraWatchdog(threading.Thread):
         reconnects,
         detection_frame,
         stop_event,
+        capture_thread_id=None,
     ):
         threading.Thread.__init__(self)
+        self.name = f"watchdog:{config.name}"
         self.logger = logging.getLogger(f"watchdog.{config.name}")
+        # when the camera runs as threads of a shared process, its capture CPU
+        # is reported per thread, so publish the capture thread's id
+        self.capture_thread_id = capture_thread_id
         self.config = config
         self.shm_frame_count = shm_frame_count
         self.capture_thread = None
@@ -644,6 +657,8 @@ class CameraWatchdog(threading.Thread):
             self.stop_event,
         )
         self.capture_thread.start()
+        if self.capture_thread_id is not None:
+            self.capture_thread_id.value = self.capture_thread.native_id
 
     def start_all_ffmpeg(self):
         """Start all ffmpeg processes (detection and others)."""
@@ -708,7 +723,7 @@ class CameraCaptureRunner(threading.Thread):
         self.skipped_fps = skipped_fps
         self.frame_manager = SharedMemoryFrameManager()
         self.ffmpeg_process = ffmpeg_process
-        self.current_frame = Value("d", 0.0)
+        self.current_frame = FrameTime()
         self.last_frame = 0
 
     def run(self):

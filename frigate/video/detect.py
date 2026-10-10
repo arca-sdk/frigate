@@ -151,56 +151,86 @@ class CameraTracker(FrigateProcess):
         # each camera has its own process, so keep OpenCV single threaded
         cv2.setNumThreads(1)
 
-        frame_queue = self.camera_metrics.frame_queue
-        frame_shape = self.config.frame_shape
-
-        motion_detector = ImprovedMotionDetector(
-            frame_shape,
-            self.config.motion,
-            self.config.detect.fps,
-            name=self.config.name,
-            ptz_metrics=self.ptz_metrics,
-            autotracking_enabled=self.config.onvif.autotracking.enabled,
-        )
-        object_detector = RemoteObjectDetector(
-            self.config.name,
+        track_camera(
+            self.config,
+            self.model_config,
             self.labelmap,
             self.detection_queue,
-            self.model_config,
-            self.stop_event,
-        )
-
-        object_tracker = NorfairTracker(self.config, self.ptz_metrics)
-
-        frame_manager = SharedMemoryFrameManager()
-
-        # create communication for region grid updates
-        requestor = InterProcessRequestor()
-
-        process_frames(
-            requestor,
-            frame_queue,
-            frame_shape,
-            self.model_config,
-            self.config,
-            frame_manager,
-            motion_detector,
-            object_detector,
-            object_tracker,
             self.detected_objects_queue,
             self.camera_metrics,
-            self.stop_event,
             self.ptz_metrics,
             self.region_grid,
+            self.stop_event,
+            self.camera_metrics.frame_queue,
         )
 
-        # empty the frame queue
-        logger.info(f"{self.config.name}: emptying frame queue")
-        while not frame_queue.empty():
-            (frame_name, _) = frame_queue.get(False)
-            frame_manager.delete(frame_name)
 
-        logger.info(f"{self.config.name}: exiting subprocess")
+def track_camera(
+    config: CameraConfig,
+    model_config: ModelConfig,
+    labelmap: dict[int, str],
+    detection_queue: Queue,
+    detected_objects_queue: Any,
+    camera_metrics: CameraMetrics,
+    ptz_metrics: PTZMetrics,
+    region_grid: list[list[dict[str, Any]]],
+    stop_event: MpEvent,
+    frame_queue: Any,
+) -> None:
+    """Run motion detection, object detection and tracking for one camera.
+
+    Runs until stop_event is set, either as the body of a CameraTracker
+    process or as a thread of a CameraHost process.
+    """
+    frame_shape = config.frame_shape
+
+    motion_detector = ImprovedMotionDetector(
+        frame_shape,
+        config.motion,
+        config.detect.fps,
+        name=config.name,
+        ptz_metrics=ptz_metrics,
+        autotracking_enabled=config.onvif.autotracking.enabled,
+    )
+    object_detector = RemoteObjectDetector(
+        config.name,
+        labelmap,
+        detection_queue,
+        model_config,
+        stop_event,
+    )
+
+    object_tracker = NorfairTracker(config, ptz_metrics)
+
+    frame_manager = SharedMemoryFrameManager()
+
+    # create communication for region grid updates
+    requestor = InterProcessRequestor()
+
+    process_frames(
+        requestor,
+        frame_queue,
+        frame_shape,
+        model_config,
+        config,
+        frame_manager,
+        motion_detector,
+        object_detector,
+        object_tracker,
+        detected_objects_queue,
+        camera_metrics,
+        stop_event,
+        ptz_metrics,
+        region_grid,
+    )
+
+    # empty the frame queue
+    logger.info(f"{config.name}: emptying frame queue")
+    while not frame_queue.empty():
+        (frame_name, _) = frame_queue.get(False)
+        frame_manager.delete(frame_name)
+
+    logger.info(f"{config.name}: exiting subprocess")
 
 
 def detect(
@@ -314,7 +344,7 @@ def process_frames(
         if (
             not camera_enabled
             and prev_enabled != camera_enabled
-            and camera_metrics.frame_queue.empty()
+            and frame_queue.empty()
         ):
             logger.debug(
                 f"Camera {camera_config.name} disabled, clearing tracked objects"
