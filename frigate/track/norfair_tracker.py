@@ -189,8 +189,12 @@ class NorfairTracker(ObjectTracker):
             "distance_threshold": 3,
         }
 
-        self.trackers: dict[str, dict[str, Tracker]] = {}
-        self.default_tracker: dict[str, Tracker] = {}
+        self.trackers: dict[str, dict[str, Any]] = {}
+        self.default_tracker: dict[str, Any] = {}
+        # the Rust tracker covers everything except what PTZ autotracking
+        # needs (ReID and camera motion compensation), which stays on norfair.
+        # sync_trackers picks the implementation along with the trackers
+        self.use_native = False
         self.tracker_selection: tuple[bool | None, tuple[str, ...]] | None = None
         self.sync_trackers()
 
@@ -199,7 +203,33 @@ class NorfairTracker(ObjectTracker):
                 self.camera_config, self.ptz_metrics
             )
 
-    def _create_tracker(self, obj_type: str, tracker_config: dict[str, Any]) -> Tracker:
+    def _new_tracker(self, params: dict[str, Any]) -> Any:
+        """Create a norfair Tracker, or its Rust port when the camera allows it."""
+        factory = params["filter_factory"]
+        if (
+            self.use_native
+            and native is not None
+            and "reid_distance_function" not in params
+            and params["distance_function"] is frigate_distance
+            and isinstance(factory, OptimizedKalmanFilterFactory)
+            and isinstance(params["initialization_delay"], int)
+            and isinstance(params["hit_counter_max"], int)
+        ):
+            return native.NativeTracker(
+                distance_threshold=params["distance_threshold"],
+                hit_counter_max=params["hit_counter_max"],
+                initialization_delay=params["initialization_delay"],
+                r=factory.R,
+                q=factory.Q,
+                pos_variance=factory.pos_variance,
+                pos_vel_covariance=factory.pos_vel_covariance,
+                vel_variance=factory.vel_variance,
+                past_detections_length=params.get("past_detections_length", 4),
+            )
+
+        return Tracker(**params)
+
+    def _create_tracker(self, obj_type: str, tracker_config: dict[str, Any]) -> Any:
         """Helper function to create a tracker with given configuration."""
         tracker_params = {
             "distance_function": tracker_config["distance_function"],
@@ -226,7 +256,7 @@ class NorfairTracker(ObjectTracker):
                 {key: tracker_config[key] for key in reid_keys if key in tracker_config}
             )
 
-        return Tracker(**tracker_params)
+        return self._new_tracker(tracker_params)
 
     def _tracker_selection(self) -> tuple[bool | None, tuple[str, ...]]:
         autotracking = self.camera_config.onvif.autotracking
@@ -260,6 +290,7 @@ class NorfairTracker(ObjectTracker):
 
         self.tracker_selection = selection
         ptz_enabled, ptz_labels = selection
+        self.use_native = native is not None and not ptz_enabled
         self.trackers = {}
 
         for obj_type, tracker_config in self.object_type_configs.items():
@@ -276,23 +307,27 @@ class NorfairTracker(ObjectTracker):
                     )
 
         self.default_tracker = {
-            "static": Tracker(
-                distance_function=frigate_distance,
-                distance_threshold=self.default_tracker_config[  # type: ignore[arg-type]
-                    "distance_threshold"
-                ],
-                initialization_delay=self.detect_config.min_initialized,
-                hit_counter_max=self.detect_config.max_disappeared,  # type: ignore[arg-type]
-                filter_factory=self.default_tracker_config["filter_factory"],  # type: ignore[arg-type]
+            "static": self._new_tracker(
+                {
+                    "distance_function": frigate_distance,
+                    "distance_threshold": self.default_tracker_config[
+                        "distance_threshold"
+                    ],
+                    "initialization_delay": self.detect_config.min_initialized,
+                    "hit_counter_max": self.detect_config.max_disappeared,
+                    "filter_factory": self.default_tracker_config["filter_factory"],
+                }
             ),
-            "ptz": Tracker(
-                distance_function=frigate_distance,
-                distance_threshold=self.default_ptz_tracker_config[
-                    "distance_threshold"
-                ],  # type: ignore[arg-type]
-                initialization_delay=self.detect_config.min_initialized,
-                hit_counter_max=self.detect_config.max_disappeared,  # type: ignore[arg-type]
-                filter_factory=self.default_ptz_tracker_config["filter_factory"],  # type: ignore[arg-type]
+            "ptz": self._new_tracker(
+                {
+                    "distance_function": frigate_distance,
+                    "distance_threshold": self.default_ptz_tracker_config[
+                        "distance_threshold"
+                    ],
+                    "initialization_delay": self.detect_config.min_initialized,
+                    "hit_counter_max": self.detect_config.max_disappeared,
+                    "filter_factory": self.default_ptz_tracker_config["filter_factory"],
+                }
             ),
         }
 
@@ -304,7 +339,7 @@ class NorfairTracker(ObjectTracker):
             else "static"
         )
 
-    def get_tracker(self, object_type: str) -> Tracker:
+    def get_tracker(self, object_type: str) -> Any:
         """Get the tracker that match_and_update feeds this label's detections to."""
         trackers = self.trackers.get(object_type)
 
@@ -325,17 +360,15 @@ class NorfairTracker(ObjectTracker):
 
         # Get the correct tracker for this object's label
         tracker = self.get_tracker(obj["label"])
-        obj_match = next(
-            (o for o in tracker.tracked_objects if str(o.global_id) == track_id), None
-        )
+        past_detections = self._past_detection_data(tracker, track_id)
         # if we don't have a match, we have a new object
         obj["score_history"] = (
-            [p.data["score"] for p in obj_match.past_detections] if obj_match else []
+            [p["score"] for p in past_detections] if past_detections is not None else []
         )
         self.tracked_objects[id] = obj
         self.disappeared[id] = 0
-        if obj_match:
-            boxes = [p.data["box"] for p in obj_match.past_detections]
+        if past_detections is not None:
+            boxes = [p["box"] for p in past_detections]
         else:
             boxes = [obj["box"]]
 
@@ -367,11 +400,48 @@ class NorfairTracker(ObjectTracker):
             is not None
         ):
             tracker = self.get_tracker(obj["label"])
-            tracker.tracked_objects = [
-                o for o in tracker.tracked_objects if str(o.global_id) != track_id
-            ]
+            if isinstance(tracker, Tracker):
+                tracker.tracked_objects = [
+                    o for o in tracker.tracked_objects if str(o.global_id) != track_id
+                ]
+            else:
+                tracker.remove(int(track_id))
 
         del self.track_id_map[track_id]
+
+    @staticmethod
+    def _past_detection_data(tracker: Any, track_id: str) -> list[Any] | None:
+        """Data of the past detections of a tracker's object, None if unknown."""
+        if isinstance(tracker, Tracker):
+            obj_match = next(
+                (o for o in tracker.tracked_objects if str(o.global_id) == track_id),
+                None,
+            )
+            return [p.data for p in obj_match.past_detections] if obj_match else None
+
+        past: list[Any] | None = tracker.past_detection_data(int(track_id))
+        return past
+
+    def _all_trackers(self) -> list[Any]:
+        return [
+            tracker
+            for trackers_by_type in self.trackers.values()
+            for tracker in trackers_by_type.values()
+        ] + list(self.default_tracker.values())
+
+    def clear(self) -> None:
+        """Forget every tracked object, e.g. when the camera is disabled."""
+        self.tracked_objects.clear()
+        self.disappeared.clear()
+        self.stationary_box_history.clear()
+        self.positions.clear()
+        self.track_id_map.clear()
+
+        for tracker in self._all_trackers():
+            if isinstance(tracker, Tracker):
+                tracker.tracked_objects = []
+            else:
+                tracker.clear()
 
     # tracks the current position of the object based on the last N bounding boxes
     # returns False if the object has moved outside its previous position
@@ -471,10 +541,28 @@ class NorfairTracker(ObjectTracker):
             position["xmaxs"].append(xmax)
             position["ymaxs"].append(ymax)
             # by using percentiles here, we hopefully remove outliers
-            position["xmin"] = np.percentile(position["xmins"], 15)
-            position["ymin"] = np.percentile(position["ymins"], 15)
-            position["xmax"] = np.percentile(position["xmaxs"], 85)
-            position["ymax"] = np.percentile(position["ymaxs"], 85)
+            percentiles = (
+                native.position_percentiles(
+                    position["xmins"],
+                    position["ymins"],
+                    position["xmaxs"],
+                    position["ymaxs"],
+                )
+                if native is not None
+                else None
+            )
+            if percentiles is not None:
+                # same values np.percentile returns, without its overhead
+                xmin_p, ymin_p, xmax_p, ymax_p = percentiles
+                position["xmin"] = np.float64(xmin_p)
+                position["ymin"] = np.float64(ymin_p)
+                position["xmax"] = np.float64(xmax_p)
+                position["ymax"] = np.float64(ymax_p)
+            else:
+                position["xmin"] = np.percentile(position["xmins"], 15)
+                position["ymin"] = np.percentile(position["ymins"], 15)
+                position["xmax"] = np.percentile(position["xmaxs"], 85)
+                position["ymax"] = np.percentile(position["ymaxs"], 85)
 
         return True
 
@@ -554,8 +642,6 @@ class NorfairTracker(ObjectTracker):
         frame_time: float,
         detections: list[tuple[Any, Any, Any, Any, Any, Any]],
     ) -> None:
-        # Group detections by object type
-        detections_by_type: dict[str, list[Detection]] = {}
         yuv_frame: np.ndarray | None = None
 
         if (
@@ -565,14 +651,83 @@ class NorfairTracker(ObjectTracker):
             yuv_frame = self.frame_manager.get(
                 frame_name, self.camera_config.frame_shape_yuv
             )
+
+        if self.use_native:
+            all_tracked_objects = self._update_native_trackers(frame_time, detections)
+        else:
+            all_tracked_objects = self._update_norfair_trackers(
+                frame_name, frame_time, detections, yuv_frame
+            )
+
+        self._update_tracks(frame_time, detections, all_tracked_objects, yuv_frame)
+
+    @staticmethod
+    def _detection_data(
+        obj: tuple[Any, Any, Any, Any, Any, Any], frame_time: float
+    ) -> dict[str, Any]:
+        # centroid is used for other things downstream
+        centroid_x = int((obj[2][0] + obj[2][2]) / 2.0)
+        centroid_y = int((obj[2][1] + obj[2][3]) / 2.0)
+
+        return {
+            "label": obj[0],
+            "score": obj[1],
+            "box": obj[2],
+            "area": obj[3],
+            "ratio": obj[4],
+            "region": obj[5],
+            "frame_time": frame_time,
+            "centroid": (centroid_x, centroid_y),
+        }
+
+    def _update_native_trackers(
+        self,
+        frame_time: float,
+        detections: list[tuple[Any, Any, Any, Any, Any, Any]],
+    ) -> list[tuple[str, tuple[int, int, int, int], np.ndarray, dict[str, Any]]]:
+        """Run the Rust trackers; same results as _update_norfair_trackers."""
+        detections_by_type: dict[str, list[tuple[str, Any, dict[str, Any]]]] = {}
+        for obj in detections:
+            detections_by_type.setdefault(obj[0], []).append(
+                (obj[0], obj[2], self._detection_data(obj, frame_time))
+            )
+
+        results = []
+        for label in self.trackers:
+            results.extend(
+                self.get_tracker(label).update(detections_by_type.get(label, []))
+            )
+
+        # objects without specific trackers go to the default tracker
+        default_detections = [
+            detection
+            for label, dets in detections_by_type.items()
+            if label not in self.trackers
+            for detection in dets
+        ]
+        results.extend(
+            self.default_tracker[self._default_mode()].update(default_detections)
+        )
+
+        return [
+            (str(global_id), estimate, velocity, data)
+            for global_id, estimate, velocity, data in results
+        ]
+
+    def _update_norfair_trackers(
+        self,
+        frame_name: str,
+        frame_time: float,
+        detections: list[tuple[Any, Any, Any, Any, Any, Any]],
+        yuv_frame: np.ndarray | None,
+    ) -> list[tuple[str, tuple[int, int, int, int], np.ndarray, dict[str, Any]]]:
+        # Group detections by object type
+        detections_by_type: dict[str, list[Detection]] = {}
+
         for obj in detections:
             label = obj[0]
             if label not in detections_by_type:
                 detections_by_type[label] = []
-
-            # centroid is used for other things downstream
-            centroid_x = int((obj[2][0] + obj[2][2]) / 2.0)
-            centroid_y = int((obj[2][1] + obj[2][3]) / 2.0)
 
             # track based on top,left and bottom,right corners instead of centroid
             points = np.array([[obj[2][0], obj[2][1]], [obj[2][2], obj[2][3]]])
@@ -588,16 +743,7 @@ class NorfairTracker(ObjectTracker):
                 label=label,
                 # TODO: stationary objects won't have embeddings
                 embedding=embedding,
-                data={
-                    "label": label,
-                    "score": obj[1],
-                    "box": obj[2],
-                    "area": obj[3],
-                    "ratio": obj[4],
-                    "region": obj[5],
-                    "frame_time": frame_time,
-                    "centroid": (centroid_x, centroid_y),
-                },
+                data=self._detection_data(obj, frame_time),
             )
             detections_by_type[label].append(detection)
 
@@ -636,28 +782,48 @@ class NorfairTracker(ObjectTracker):
         )
         all_tracked_objects.extend(tracked_objects)
 
+        return [
+            (
+                str(t.global_id),
+                cast(
+                    tuple[int, int, int, int], tuple(t.estimate.flatten().astype(int))
+                ),
+                t.estimate_velocity,
+                t.last_detection.data,
+            )
+            for t in all_tracked_objects
+        ]
+
+    def _update_tracks(
+        self,
+        frame_time: float,
+        detections: list[tuple[Any, Any, Any, Any, Any, Any]],
+        all_tracked_objects: list[
+            tuple[str, tuple[int, int, int, int], np.ndarray, dict[str, Any]]
+        ],
+        yuv_frame: np.ndarray | None,
+    ) -> None:
         # update or create new tracks
         active_ids = []
-        for t in all_tracked_objects:
-            estimate = tuple(t.estimate.flatten().astype(int))
+        for track_id, raw_estimate, estimate_velocity, data in all_tracked_objects:
             # keep the estimate within the bounds of the image
             estimate = (
-                max(0, estimate[0]),
-                max(0, estimate[1]),
-                min(self.detect_config.width - 1, estimate[2]),  # type: ignore[operator]
-                min(self.detect_config.height - 1, estimate[3]),  # type: ignore[operator]
+                max(0, raw_estimate[0]),
+                max(0, raw_estimate[1]),
+                min(self.detect_config.width - 1, raw_estimate[2]),  # type: ignore[operator]
+                min(self.detect_config.height - 1, raw_estimate[3]),  # type: ignore[operator]
             )
             new_obj = {
-                **t.last_detection.data,
+                **data,
                 "estimate": estimate,
-                "estimate_velocity": t.estimate_velocity,
+                "estimate_velocity": estimate_velocity,
             }
-            active_ids.append(str(t.global_id))
-            if str(t.global_id) not in self.track_id_map:
-                self.register(str(t.global_id), new_obj)
+            active_ids.append(track_id)
+            if track_id not in self.track_id_map:
+                self.register(track_id, new_obj)
             # if there wasn't a detection in this frame, increment disappeared
-            elif t.last_detection.data["frame_time"] != frame_time:
-                id = self.track_id_map[str(t.global_id)]
+            elif data["frame_time"] != frame_time:
+                id = self.track_id_map[track_id]
                 self.disappeared[id] += 1
                 # sometimes the estimate gets way off
                 # only update if the upper left corner is actually upper left
@@ -667,7 +833,7 @@ class NorfairTracker(ObjectTracker):
             else:
                 thresholds = get_stationary_threshold(new_obj["label"])
                 self.update(
-                    str(t.global_id),
+                    track_id,
                     new_obj,
                     thresholds,
                     yuv_frame if thresholds.motion_classifier_enabled else None,
@@ -717,14 +883,10 @@ class NorfairTracker(ObjectTracker):
                     self.trackers["license_plate"]["static"].tracked_objects
                 )
 
-        # Get tracked objects from type-specific trackers
-        for object_trackers in self.trackers.values():
-            for tracker in object_trackers.values():
+        # Get tracked objects from all trackers (only norfair exposes them)
+        for tracker in self._all_trackers():
+            if isinstance(tracker, Tracker):
                 all_tracked_objects.extend(tracker.tracked_objects)
-
-        # Get tracked objects from default trackers
-        for tracker in self.default_tracker.values():
-            all_tracked_objects.extend(tracker.tracked_objects)
 
         active_detections = [
             Drawable(id=obj.id, points=obj.last_detection.points, label=obj.label)

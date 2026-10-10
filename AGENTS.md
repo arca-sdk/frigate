@@ -422,7 +422,7 @@ Outbound WebSocket broadcasts go through a per-recipient classifier in `frigate/
 
 ## Rust Extension
 
-Some per-frame hot paths have Rust implementations in `rust/frigate_native` (see its README), loaded through `frigate/util/native.py`: the motion detector's pixel pipeline, the tracker's `distance()`, `get_cluster_candidates()` and `reduce_detections()`. The Python versions remain the reference and the fallback. **When changing any of them, make the same change in Rust**; `frigate/test/test_native.py` compares both on randomized inputs and fails on any difference. `FRIGATE_DISABLE_NATIVE=1` forces the Python implementations.
+Some per-frame hot paths have Rust implementations in `rust/frigate_native` (see its README), loaded through `frigate/util/native.py`: the motion detector's pixel pipeline, the object tracker (norfair's `Tracker` as used by `NorfairTracker`, plus `distance()` and the position percentiles), `get_cluster_candidates()` and `reduce_detections()`. The Python versions remain the reference and the fallback. **When changing any of them, make the same change in Rust**; `frigate/test/test_native.py` compares both on randomized inputs and fails on any difference. `FRIGATE_DISABLE_NATIVE=1` forces the Python implementations.
 
 ## Project-Specific Conventions
 

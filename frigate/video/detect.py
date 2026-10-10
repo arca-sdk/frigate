@@ -321,19 +321,7 @@ def process_frames(
             )
             prev_enabled = camera_enabled
 
-            # Clear norfair's dictionaries
-            object_tracker.tracked_objects.clear()
-            object_tracker.disappeared.clear()
-            object_tracker.stationary_box_history.clear()
-            object_tracker.positions.clear()
-            object_tracker.track_id_map.clear()
-
-            # Clear internal norfair states
-            for trackers_by_type in object_tracker.trackers.values():
-                for tracker in trackers_by_type.values():
-                    tracker.tracked_objects = []
-            for tracker in object_tracker.default_tracker.values():
-                tracker.tracked_objects = []
+            object_tracker.clear()
 
         if not camera_enabled:
             time.sleep(0.1)

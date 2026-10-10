@@ -4,6 +4,7 @@ Each test runs the same inputs through the Rust code and through the original
 Python code (by patching ``native`` to None) and requires identical results.
 """
 
+import copy
 import os
 import random
 import unittest
@@ -11,10 +12,13 @@ from unittest.mock import patch
 
 import numpy as np
 
+from frigate.camera import PTZMetrics
+from frigate.config import FrigateConfig
 from frigate.config.camera.motion import MotionConfig
 from frigate.motion import improved_motion
 from frigate.motion.improved_motion import ImprovedMotionDetector
 from frigate.track import norfair_tracker
+from frigate.track.norfair_tracker import NorfairTracker
 from frigate.util import native as native_module
 from frigate.util import object as object_util
 from frigate.util.native import native
@@ -202,6 +206,159 @@ class TestNativeMotion(unittest.TestCase):
         ) as spy:
             detector.detect(next(self.frames(360, 640, 1, 0)))
         spy.assert_called_once()
+
+
+def tracker_scene(seed: int, frames: int, max_objects: int):
+    """Detections of objects that move, stand still, appear and vanish."""
+    rng = random.Random(seed)
+    objects: list[dict] = []
+    frame_time = 1_700_000_000.0
+    for _ in range(frames):
+        frame_time += 0.2
+        if len(objects) < max_objects and rng.random() < 0.15:
+            w, h = rng.randint(30, 200), rng.randint(40, 300)
+            moving = rng.random() < 0.7
+            objects.append(
+                {
+                    "label": rng.choice(["person", "person", "car", "dog", "cat"]),
+                    "x": rng.uniform(0, 1280 - w),
+                    "y": rng.uniform(0, 720 - h),
+                    "w": w,
+                    "h": h,
+                    "vx": rng.uniform(-12, 12) if moving else 0.0,
+                    "vy": rng.uniform(-6, 6) if moving else 0.0,
+                    "life": rng.randint(5, 150),
+                }
+            )
+        detections = []
+        for o in objects:
+            o["x"] = min(max(0.0, o["x"] + o["vx"]), 1280 - o["w"] - 1)
+            o["y"] = min(max(0.0, o["y"] + o["vy"]), 720 - o["h"] - 1)
+            o["life"] -= 1
+            if rng.random() < 0.1:
+                continue  # missed detection
+            x1 = max(0, int(o["x"]) + rng.randint(-3, 3))
+            y1 = max(0, int(o["y"]) + rng.randint(-3, 3))
+            x2 = min(1279, int(o["x"] + o["w"]) + rng.randint(-3, 3))
+            y2 = min(719, int(o["y"] + o["h"]) + rng.randint(-3, 3))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            region = (
+                max(0, x1 - 50),
+                max(0, y1 - 50),
+                max(0, x1 - 50) + 320,
+                max(0, y1 - 50) + 320,
+            )
+            detections.append(
+                (
+                    o["label"],
+                    round(rng.uniform(0.5, 0.95), 2),
+                    (x1, y1, x2, y2),
+                    (x2 - x1) * (y2 - y1),
+                    (x2 - x1) / (y2 - y1),
+                    region,
+                )
+            )
+        objects = [o for o in objects if o["life"] > 0]
+        rng.shuffle(detections)
+        yield frame_time, detections
+
+
+@unittest.skipIf(native is None, "frigate_native is not installed")
+class TestNativeObjectTracker(unittest.TestCase):
+    """The Rust tracker must leave NorfairTracker in exactly the same state."""
+
+    def camera_config(self, **detect):
+        config = FrigateConfig(
+            **{
+                "mqtt": {"enabled": False},
+                "cameras": {
+                    "front": {
+                        "ffmpeg": {
+                            "inputs": [
+                                {"path": "rtsp://10.0.0.1/live", "roles": ["detect"]}
+                            ]
+                        },
+                        "detect": {"width": 1280, "height": 720, "fps": 5, **detect},
+                        "objects": {"track": ["person", "car", "dog"]},
+                    }
+                },
+            }
+        )
+        return config.cameras["front"]
+
+    def run_tracker(self, config, frames, use_native: bool, seed: int):
+        # object ids are random, so seed both runs the same way
+        random.seed(seed)
+        states = []
+        with patch.object(norfair_tracker, "native", native if use_native else None):
+            tracker = NorfairTracker(config, PTZMetrics())
+            self.assertEqual(tracker.use_native, use_native)
+            for frame_time, detections in frames:
+                tracker.match_and_update("frame", frame_time, detections)
+                states.append(
+                    copy.deepcopy(
+                        (
+                            tracker.tracked_objects,
+                            tracker.disappeared,
+                            tracker.positions,
+                            tracker.stationary_box_history,
+                            tracker.untracked_object_boxes,
+                        )
+                    )
+                )
+        return states
+
+    def test_tracker_matches_norfair(self):
+        cases = [
+            {},
+            {"min_initialized": 3, "max_disappeared": 10},
+            {"min_initialized": 2, "max_disappeared": 4},
+            {"stationary": {"max_frames": {"default": 20}, "threshold": 3}},
+        ]
+        registered = 0
+        for seed, detect in enumerate(cases):
+            with self.subTest(detect=detect):
+                config = self.camera_config(**detect)
+                frames = list(tracker_scene(seed, 250, max_objects=12))
+                expected = self.run_tracker(config, frames, False, seed)
+                result = self.run_tracker(config, frames, True, seed)
+                for frame, (a, b) in enumerate(zip(result, expected)):
+                    # numpy arrays inside the objects need array comparisons
+                    np.testing.assert_equal(a, b, err_msg=f"frame {frame}")
+                registered += len({k for state in expected for k in state[0]})
+        self.assertGreater(registered, 100)
+
+    def test_ptz_autotracking_keeps_norfair(self):
+        config = self.camera_config()
+        config.onvif.autotracking.enabled_in_config = True
+        tracker = NorfairTracker(config, PTZMetrics())
+        self.assertFalse(tracker.use_native)
+
+    def test_clear_forgets_objects(self):
+        config = self.camera_config()
+        tracker = NorfairTracker(config, PTZMetrics())
+        for frame_time, detections in tracker_scene(1, 30, max_objects=5):
+            tracker.match_and_update("frame", frame_time, detections)
+        self.assertTrue(tracker.tracked_objects)
+        tracker.clear()
+        self.assertEqual(tracker.tracked_objects, {})
+        self.assertEqual(sum(len(t) for t in tracker._all_trackers()), 0)
+
+    def test_position_percentiles_match_numpy(self):
+        rng = random.Random(5)
+        for _ in range(500):
+            lists = [
+                [rng.randint(0, 1280) for _ in range(rng.randint(1, 10))]
+                for _ in range(4)
+            ]
+            expected = (
+                np.percentile(lists[0], 15),
+                np.percentile(lists[1], 15),
+                np.percentile(lists[2], 85),
+                np.percentile(lists[3], 85),
+            )
+            self.assertEqual(native.position_percentiles(*lists), expected)
 
 
 if __name__ == "__main__":

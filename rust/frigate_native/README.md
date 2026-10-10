@@ -10,6 +10,14 @@ Python versions stay in place as the reference and as the fallback.
 | `box_distance` | `distance()` used by the norfair tracker for every detection/object pair | ~100x per pair |
 | `cluster_candidates` | clustering loop of `get_cluster_candidates()` | 4x (5 boxes) to 20x (40 boxes) |
 | `reduce_detections` | `reduce_detections()` (per label NMS and consolidation) | 3-4x |
+| `NativeTracker` | norfair's `Tracker` (Kalman filter, greedy matching, hit counters, past detections) used by `NorfairTracker` | 17x (3 objects) to 30x (10 objects) per frame, together with `position_percentiles` |
+| `position_percentiles` | the four `np.percentile` calls of `NorfairTracker.update_position` | |
+
+`NativeTracker` is used for every camera without PTZ autotracking in its
+config; those cameras keep norfair because autotracking needs its ReID matching
+and camera motion compensation. Over 59,200 simulated frames (8,403 objects)
+the tracker state, including Frigate's object ids, matched norfair on every
+frame.
 
 Contour extraction in the motion detector stays in OpenCV, because the order of
 the contours it returns determines how motion boxes are clustered.

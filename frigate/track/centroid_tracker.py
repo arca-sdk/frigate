@@ -20,6 +20,11 @@ class CentroidTracker(ObjectTracker):
         self.max_disappeared = config.max_disappeared
         self.detect_config = config
 
+    def clear(self) -> None:
+        self.tracked_objects.clear()
+        self.disappeared.clear()
+        self.positions.clear()
+
     def register(self, obj: dict[str, Any]) -> None:
         rand_id = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
         id = f"{obj['frame_time']}-{rand_id}"

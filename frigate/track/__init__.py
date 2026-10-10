@@ -17,3 +17,8 @@ class ObjectTracker(ABC):
         detections: list[tuple[Any, Any, Any, Any, Any, Any]],
     ) -> None:
         pass
+
+    @abstractmethod
+    def clear(self) -> None:
+        """Forget every tracked object, e.g. when the camera is disabled."""
+        pass
