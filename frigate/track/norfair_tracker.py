@@ -28,6 +28,7 @@ from frigate.util.image import (
     get_histogram,
     intersection_over_union,
 )
+from frigate.util.native import native
 from frigate.util.object import average_boxes, median_of_boxes
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,15 @@ def distance(detection: np.ndarray, estimate: np.ndarray) -> float:
 
 
 def frigate_distance(detection: Detection, tracked_object: TrackedObject) -> float:
+    # norfair calls this for every detection and tracked object pair on every
+    # frame, so the per-call numpy overhead adds up
+    if native is not None:
+        result: float | None = native.box_distance(
+            detection.points, tracked_object.estimate
+        )
+        if result is not None:
+            return result
+
     return distance(detection.points, tracked_object.estimate)
 
 

@@ -90,6 +90,7 @@ from frigate.timeline import TimelineProcessor
 from frigate.track.object_processing import TrackedObjectProcessor
 from frigate.util.builtin import empty_and_close_queue
 from frigate.util.image import UntrackedSharedMemory
+from frigate.util.native import native
 from frigate.util.ownership import chown_to_runtime
 from frigate.util.process import FrigateProcess
 from frigate.util.runtime_deps import RuntimeDependencyError
@@ -626,6 +627,14 @@ class FrigateApp:
 
     def start(self) -> None:
         logger.info(f"Starting Frigate ({VERSION})")
+
+        if native is not None:
+            logger.info(
+                "Using Rust implementations of per-frame hot paths (frigate_native %s)",
+                native.__version__,
+            )
+        else:
+            logger.info("Rust extension not loaded, using Python implementations")
 
         # Ensure global state.
         self.ensure_dirs()

@@ -420,6 +420,10 @@ except ValueError:
 
 Outbound WebSocket broadcasts go through a per-recipient classifier in `frigate/comms/ws.py` that enforces camera-level access. **The classifier is fail-closed: any topic it doesn't recognize is dropped for every client.** New outbound topics must be classified there or they'll silently disappear.
 
+## Rust Extension
+
+Some per-frame hot paths have Rust implementations in `rust/frigate_native` (see its README), loaded through `frigate/util/native.py`: the motion detector's pixel pipeline, the tracker's `distance()`, `get_cluster_candidates()` and `reduce_detections()`. The Python versions remain the reference and the fallback. **When changing any of them, make the same change in Rust**; `frigate/test/test_native.py` compares both on randomized inputs and fails on any difference. `FRIGATE_DISABLE_NATIVE=1` forces the Python implementations.
+
 ## Project-Specific Conventions
 
 ### Configuration Files

@@ -9,6 +9,9 @@ ARG PIP_BREAK_SYSTEM_PACKAGES=1
 ARG BASE_IMAGE=debian:12
 ARG SLIM_BASE=debian:12-slim
 
+# Toolchain for the Rust extension in rust/frigate_native
+ARG RUST_VERSION=1.99
+
 # A hook that allows us to inject commands right after the base images
 ARG BASE_HOOK=
 
@@ -355,6 +358,25 @@ HEALTHCHECK NONE
 CMD ["sleep", "infinity"]
 
 
+# Rust implementations of per-frame hot paths (rust/frigate_native). Built on
+# Debian 12 so the extension only needs the oldest glibc any variant ships.
+FROM rust:${RUST_VERSION}-bookworm AS native-build
+ARG DEBIAN_FRONTEND
+ARG PIP_BREAK_SYSTEM_PACKAGES
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3-pip \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip3 install "maturin>=1.9,<2"
+
+WORKDIR /build
+COPY rust/frigate_native/ ./
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/target \
+    maturin build --release --out /wheels \
+    && pip3 install --no-deps --target /native /wheels/*.whl
+
+
 # Frigate web build
 # This should be architecture agnostic, so speed up the build on multiarch by not using QEMU.
 FROM --platform=$BUILDPLATFORM node:20 AS web-build
@@ -374,6 +396,9 @@ FROM scratch AS rootfs
 WORKDIR /opt/frigate/
 COPY frigate frigate/
 COPY migrations migrations/
+# importable next to the frigate package, so every image variant built from
+# this rootfs gets it; Frigate falls back to Python if it cannot load
+COPY --from=native-build /native/ ./
 COPY --from=web-build /work/dist/ web/
 
 # Frigate final container
@@ -384,4 +409,4 @@ COPY --from=rootfs / /
 
 # Pre-compile bytecode so a read-only rootfs doesn't force re-parsing the
 # source tree on every boot (pip-installed packages are already compiled)
-RUN python3 -m compileall -q -j0 /opt/frigate/frigate
+RUN python3 -m compileall -q -j0 /opt/frigate/frigate /opt/frigate/frigate_native
