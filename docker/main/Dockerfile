@@ -320,8 +320,33 @@ CMD []
 HEALTHCHECK --start-period=300s --start-interval=5s --interval=15s --timeout=5s --retries=3 \
     CMD test -f /dev/shm/.frigate-is-stopping && exit 0; curl --fail --silent --show-error http://127.0.0.1:5000/api/version || exit 1
 
+# Rust implementations of per-frame hot paths (rust/frigate_native). Built on
+# Debian 12 so the extension only needs the oldest glibc any variant ships.
+FROM rust:${RUST_VERSION}-bookworm AS native-build
+ARG DEBIAN_FRONTEND
+ARG PIP_BREAK_SYSTEM_PACKAGES
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3-pip \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip3 install "maturin>=1.9,<2"
+
+WORKDIR /build
+COPY rust/frigate_native/ ./
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/target \
+    maturin build --release --out /wheels \
+    && pip3 install --no-deps --target /native /wheels/*.whl
+
+
 # Frigate deps with Node.js and NPM for devcontainer
 FROM deps AS devcontainer
+ARG PIP_BREAK_SYSTEM_PACKAGES
+
+# the Rust extension, so the parity tests in frigate/test/test_native.py run
+# here (and in CI) instead of being skipped
+RUN --mount=type=bind,from=native-build,source=/wheels,target=/deps/native-wheels \
+    pip3 install --no-deps /deps/native-wheels/*.whl
 
 # /config here is the developer's bind-mounted checkout, not a data volume, so
 # the prepare ownership sweep must not run: it would chown the source tree to
@@ -356,25 +381,6 @@ RUN --mount=type=bind,source=./docker/main/requirements-dev.txt,target=/workspac
 HEALTHCHECK NONE
 
 CMD ["sleep", "infinity"]
-
-
-# Rust implementations of per-frame hot paths (rust/frigate_native). Built on
-# Debian 12 so the extension only needs the oldest glibc any variant ships.
-FROM rust:${RUST_VERSION}-bookworm AS native-build
-ARG DEBIAN_FRONTEND
-ARG PIP_BREAK_SYSTEM_PACKAGES
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3-pip \
-    && rm -rf /var/lib/apt/lists/* \
-    && pip3 install "maturin>=1.9,<2"
-
-WORKDIR /build
-COPY rust/frigate_native/ ./
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/build/target \
-    maturin build --release --out /wheels \
-    && pip3 install --no-deps --target /native /wheels/*.whl
 
 
 # Frigate web build

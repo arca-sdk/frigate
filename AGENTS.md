@@ -426,7 +426,7 @@ Some per-frame hot paths have Rust implementations in `rust/frigate_native` (see
 
 ## Camera Host Processes
 
-By default cameras run as threads of camera host processes (`frigate/camera/host.py`), up to 8 cameras per process, instead of a capture process and a tracking process per camera. `FRIGATE_CAMERAS_PER_PROCESS` sets the group size; `0` restores one capture and one tracking process per camera. Cameras added at runtime get their own host, the camera maintainer restarts a host that dies, and per camera CPU stats are reported per thread. Code that runs in the capture or tracking path must therefore be safe to run in threads alongside other cameras: no process-global state per camera.
+By default cameras run as threads of camera host processes (`frigate/camera/host.py`), up to 8 cameras per process, instead of a capture process and a tracking process per camera. `FRIGATE_CAMERAS_PER_PROCESS` sets the group size; `0` restores one capture and one tracking process per camera. Cameras added at runtime get their own host. When a host dies, or one of a camera's threads stops, the camera maintainer restarts the affected cameras with their current config and stops any ffmpeg left behind. Per camera CPU stats are reported per thread. Code that runs in the capture or tracking path must therefore be safe to run in threads alongside other cameras: no process-global state per camera.
 
 ## Project-Specific Conventions
 

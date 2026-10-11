@@ -77,23 +77,49 @@ class CameraHost(FrigateProcess):
         # all OpenCV work here is on small images, see CameraTracker.run
         cv2.setNumThreads(1)
 
-        running: list[tuple[HostedCamera, list[threading.Thread]]] = []
-        for camera in self.cameras:
-            running.append((camera, self._start_camera(camera)))
+        running = [(camera, *self._start_camera(camera)) for camera in self.cameras]
 
         # report each camera as done once both its threads are gone, so the
         # maintainer can stop cameras individually; exit when none are left
         while running:
-            for camera, threads in list(running):
-                for thread in threads:
+            for entry in list(running):
+                camera, watchdog, tracker = entry
+                for thread in (watchdog, tracker):
                     thread.join(timeout=0.5 / len(running))
-                if not any(thread.is_alive() for thread in threads):
+                alive = [t for t in (watchdog, tracker) if t.is_alive()]
+
+                if len(alive) == 1 and not camera.stop_event.is_set():
+                    # one thread stopped on its own: stop the other as well so
+                    # the camera is reported done and the maintainer restarts it
+                    logger.error(
+                        "%s: the %s thread stopped unexpectedly, stopping the camera",
+                        camera.config.name,
+                        "tracking" if alive[0] is watchdog else "capture",
+                    )
+                    camera.stop_event.set()
+
+                if not alive:
+                    self._stop_ffmpeg(camera, watchdog)
                     camera.done_event.set()
-                    running.remove((camera, threads))
+                    running.remove(entry)
 
         logger.info("All hosted cameras stopped, exiting")
 
-    def _start_camera(self, camera: HostedCamera) -> list[threading.Thread]:
+    @staticmethod
+    def _stop_ffmpeg(camera: HostedCamera, watchdog: CameraWatchdog) -> None:
+        """Stop ffmpeg processes a crashed watchdog left behind.
+
+        ffmpeg runs in its own session, so nothing else stops it; after a
+        clean exit the watchdog already did and this does nothing.
+        """
+        try:
+            watchdog.stop_all_ffmpeg()
+        except Exception:
+            logger.exception("Failed to stop ffmpeg for %s", camera.config.name)
+
+    def _start_camera(
+        self, camera: HostedCamera
+    ) -> tuple[CameraWatchdog, threading.Thread]:
         name = camera.config.name
         metrics = camera.camera_metrics
         # capture and tracking of the same camera share frames in-process
@@ -138,4 +164,4 @@ class CameraHost(FrigateProcess):
         watchdog.start()
         tracker.start()
         logger.info("Started capture and tracking threads for %s", name)
-        return [watchdog, tracker]
+        return watchdog, tracker

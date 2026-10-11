@@ -474,6 +474,7 @@ class FrigateApp:
             self.ptz_metrics,
             self.stop_event,
             self.metrics_manager,
+            config_holder=self.config_holder,
         )
         self.camera_maintainer.start()
 

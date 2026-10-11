@@ -125,4 +125,6 @@ jobs:
       - name: Check API spec is up to date
         run: devcontainer exec --workspace-folder . bash -lc "python3 generate_api_auth_spec.py --check"
       - name: Run unit tests in devcontainer
-        run: devcontainer exec --workspace-folder . bash -lc "python3 -u -m unittest"
+        # FRIGATE_REQUIRE_NATIVE fails the run if the Rust extension is missing,
+        # instead of skipping the Rust parity tests
+        run: devcontainer exec --workspace-folder . bash -lc "FRIGATE_REQUIRE_NATIVE=1 python3 -u -m unittest"

@@ -38,6 +38,15 @@ class TestNativeLoading(unittest.TestCase):
         with patch.dict(os.environ, {"FRIGATE_DISABLE_NATIVE": "1"}):
             self.assertIsNone(native_module._load_native())
 
+    @unittest.skipUnless(
+        os.environ.get("FRIGATE_REQUIRE_NATIVE") == "1",
+        "FRIGATE_REQUIRE_NATIVE is not set",
+    )
+    def test_required_extension_is_loaded(self):
+        # CI sets FRIGATE_REQUIRE_NATIVE so the parity tests below can't be
+        # skipped because the extension failed to build or load
+        self.assertIsNotNone(native, "frigate_native could not be imported")
+
 
 @unittest.skipIf(native is None, "frigate_native is not installed")
 class TestNativeRegions(unittest.TestCase):
@@ -295,6 +304,11 @@ class TestNativeObjectTracker(unittest.TestCase):
         with patch.object(norfair_tracker, "native", native if use_native else None):
             tracker = NorfairTracker(config, PTZMetrics())
             self.assertEqual(tracker.use_native, use_native)
+            # a fallback to norfair would make this compare norfair with itself
+            expected_type = native.NativeTracker if use_native else Tracker
+            self.assertTrue(
+                all(isinstance(t, expected_type) for t in tracker._all_trackers())
+            )
             for frame_time, detections in frames:
                 tracker.match_and_update("frame", frame_time, detections)
                 states.append(
