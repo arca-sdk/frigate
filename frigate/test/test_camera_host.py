@@ -1,7 +1,9 @@
 """Tests for running cameras as threads of a camera host process."""
 
+import importlib
 import multiprocessing as mp
 import os
+import queue
 import subprocess
 import threading
 import unittest
@@ -11,6 +13,9 @@ from unittest.mock import MagicMock, patch
 from frigate.camera import host as host_module
 from frigate.camera.host import CameraHost, HostedCamera
 from frigate.camera.maintainer import get_cameras_per_process
+from frigate.log import LogPipe
+from frigate.util.image import SharedMemoryFrameManager
+from frigate.video.ffmpeg import CameraWatchdog
 
 
 class FakeWatchdog(threading.Thread):
@@ -23,9 +28,6 @@ class FakeWatchdog(threading.Thread):
 
     def run(self) -> None:
         self.stop_event.wait()
-
-    def stop_all_ffmpeg(self) -> None:
-        self.ffmpeg_stopped = True
 
 
 def hosted_camera(name: str) -> HostedCamera:
@@ -51,6 +53,10 @@ def hosted_camera(name: str) -> HostedCamera:
         stop_event=mp.Event(),
         done_event=mp.Event(),
     )
+
+
+# frigate.video re-exports the detect function under the module's name
+detect_module = importlib.import_module("frigate.video.detect")
 
 
 class TestCameraHost(unittest.TestCase):
@@ -111,31 +117,47 @@ class TestCameraHost(unittest.TestCase):
         runner.join(5)
         self.assertFalse(runner.is_alive())
 
-    def test_capture_failure_stops_tracking_and_ffmpeg(self):
+    def test_capture_failure_stops_tracking(self):
         tracking_stopped = threading.Event()
 
         def track_camera(config, *args):
             args[7].wait()
             tracking_stopped.set()
 
-        camera = hosted_camera("a")
-        watchdogs: list[FakeWatchdog] = []
-
         class CrashingWatchdog(FakeWatchdog):
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, **kwargs)
-                watchdogs.append(self)
-
             def run(self) -> None:
                 raise RuntimeError("ffmpeg config is broken")
 
+        camera = hosted_camera("a")
         self.run_host([camera], track_camera, watchdog=CrashingWatchdog)
-        self.assertTrue(camera.done_event.wait(5))
 
+        self.assertTrue(camera.done_event.wait(5))
         self.assertTrue(tracking_stopped.is_set())
-        # ffmpeg runs in its own session, so the host stops what the crashed
-        # watchdog left behind
-        self.assertTrue(watchdogs[0].ffmpeg_stopped)
+
+    def test_stopped_tracking_keeps_the_frame_slots(self):
+        slot = f"test_camera_host_{os.getpid()}_frame0"
+        owner = SharedMemoryFrameManager()
+        owner.create(slot, 24)
+        self.addCleanup(owner.cleanup)
+
+        frame_queue: queue.Queue = queue.Queue()
+        frame_queue.put((slot, 0.0))
+        config = MagicMock()
+        config.name = "test"
+        with patch.multiple(
+            detect_module,
+            ImprovedMotionDetector=MagicMock(),
+            RemoteObjectDetector=MagicMock(),
+            NorfairTracker=MagicMock(),
+            InterProcessRequestor=MagicMock(),
+            process_frames=MagicMock(),
+        ):
+            detect_module.track_camera(config, *[MagicMock()] * 8, frame_queue)
+
+        # the frames left in the queue are dropped, but their slots stay for
+        # the capture thread of the restarted camera
+        self.assertTrue(frame_queue.empty())
+        self.assertIsNotNone(SharedMemoryFrameManager().get(slot, (4, 6)))
 
     def test_tracking_thread_reports_its_id(self):
         reported = threading.Event()
@@ -150,6 +172,27 @@ class TestCameraHost(unittest.TestCase):
         self.run_host([camera], track_camera)
         self.assertTrue(reported.wait(5))
         self.assertEqual(camera.camera_metrics.process_pid.value, ids[0])
+
+
+class TestCameraWatchdogCleanup(unittest.TestCase):
+    def test_error_still_stops_ffmpeg_and_closes_the_log_pipe(self):
+        watchdog = CameraWatchdog.__new__(CameraWatchdog)
+        watchdog.logpipe = LogPipe("ffmpeg.test.detect")
+        watchdog.stop_all_ffmpeg = MagicMock()
+        watchdog.config_subscriber = MagicMock()
+        watchdog.segment_subscriber = MagicMock()
+
+        with patch.object(CameraWatchdog, "_watch", side_effect=RuntimeError):
+            with self.assertRaises(RuntimeError):
+                watchdog.run()
+
+        # ffmpeg runs in its own session, so nothing else would stop it
+        watchdog.stop_all_ffmpeg.assert_called_once()
+        watchdog.config_subscriber.stop.assert_called_once()
+        watchdog.segment_subscriber.stop.assert_called_once()
+        # the log pipe's thread is not a daemon and would keep the host alive
+        watchdog.logpipe.join(5)
+        self.assertFalse(watchdog.logpipe.is_alive())
 
 
 class TestCamerasPerProcess(unittest.TestCase):
@@ -175,6 +218,9 @@ class FakeHost:
         self.pid = None
         self.exitcode = None
         self.joined = False
+        # a host that doesn't exit when asked, until it is terminated
+        self.stuck = False
+        self.terminated = False
         FakeHost.created.append(self)
 
     def start(self) -> None:
@@ -185,9 +231,11 @@ class FakeHost:
 
     def join(self, timeout=None) -> None:
         self.joined = True
-        self.alive = False
+        if not self.stuck:
+            self.alive = False
 
     def terminate(self) -> None:
+        self.terminated = True
         self.alive = False
 
 
@@ -294,12 +342,11 @@ class TestMaintainerCameraHosts(unittest.TestCase):
     def test_failed_camera_restarts_alone_with_the_current_config(self):
         self.start(["a", "b"])
         old_host = FakeHost.created[0]
-        new_config = SimpleNamespace(name="a", enabled_in_config=True)
-        model = self.maintainer.config.model_for_camera("a")
+        new_config = SimpleNamespace(
+            name="a", enabled_in_config=True, frame_shape_yuv=(6, 4)
+        )
         self.maintainer.config_holder = SimpleNamespace(
-            config=SimpleNamespace(
-                cameras={"a": new_config}, model_for_camera=lambda name: model
-            )
+            config=SimpleNamespace(cameras={"a": new_config})
         )
 
         # the host reported camera a done although nobody stopped it
@@ -311,6 +358,55 @@ class TestMaintainerCameraHosts(unittest.TestCase):
         self.assertIs(self.maintainer.camera_hosts["a"], restarted)
         self.assertIs(self.maintainer.camera_hosts["b"], old_host)
         self.assertFalse(self.maintainer.camera_stop_events["a"].is_set())
+
+    def test_restart_keeps_the_frame_size_it_started_with(self):
+        self.start(["a"])
+        old_config = self.maintainer.hosted_cameras["a"].config
+        new_config = SimpleNamespace(
+            name="a", enabled_in_config=True, frame_shape_yuv=(9, 4)
+        )
+        self.maintainer.config_holder = SimpleNamespace(
+            config=SimpleNamespace(cameras={"a": new_config})
+        )
+
+        self.maintainer.camera_done_events["a"].set()
+        self.maintainer._CameraMaintainer__restart_failed_cameras()
+
+        # its frame slots, and the processes reading them, use the old size
+        self.assertIs(FakeHost.created[1].cameras[0].config, old_config)
+
+    def test_camera_disabled_in_the_saved_config_is_not_restarted(self):
+        self.start(["a", "b"])
+        old_host = FakeHost.created[0]
+        disabled = SimpleNamespace(
+            name="a", enabled_in_config=False, frame_shape_yuv=(6, 4)
+        )
+        self.maintainer.config_holder = SimpleNamespace(
+            config=SimpleNamespace(cameras={"a": disabled})
+        )
+
+        self.maintainer.camera_done_events["a"].set()
+        self.maintainer._CameraMaintainer__restart_failed_cameras()
+
+        self.assertEqual(len(FakeHost.created), 1)
+        self.assertNotIn("a", self.maintainer.camera_hosts)
+        self.assertIs(self.maintainer.camera_hosts["b"], old_host)
+
+        # it is no longer tracked as a failed camera
+        self.maintainer.host_restart_times.clear()
+        self.maintainer._CameraMaintainer__restart_failed_cameras()
+        self.assertEqual(len(FakeHost.created), 1)
+
+    def test_host_that_does_not_exit_is_terminated(self):
+        self.start(["a"])
+        host = FakeHost.created[0]
+        host.stuck = True
+
+        self.maintainer.camera_done_events["a"].set()
+        self.maintainer._CameraMaintainer__restart_failed_cameras()
+
+        self.assertTrue(host.terminated)
+        self.assertIs(self.maintainer.camera_hosts["a"], FakeHost.created[1])
 
     def test_dead_host_children_are_stopped(self):
         import psutil

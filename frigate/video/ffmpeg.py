@@ -367,6 +367,17 @@ class CameraWatchdog(threading.Thread):
             self._grant_restart_grace([STREAM_TYPE_SUB], datetime.now().astimezone(UTC))
 
     def run(self) -> None:
+        try:
+            self._watch()
+        finally:
+            # also after an error: ffmpeg runs in its own session, and the log
+            # pipe's thread keeps the process alive until the pipe is closed
+            self.stop_all_ffmpeg()
+            self.logpipe.close()
+            self.config_subscriber.stop()
+            self.segment_subscriber.stop()
+
+    def _watch(self) -> None:
         if self._update_enabled_state():
             self.start_all_ffmpeg()
             # If recording is enabled at startup, set the grace period timer
@@ -631,11 +642,6 @@ class CameraWatchdog(threading.Thread):
 
                 if self.stalls:
                     self.stalls.value = len(self._stall_timestamps)
-
-        self.stop_all_ffmpeg()
-        self.logpipe.close()
-        self.config_subscriber.stop()
-        self.segment_subscriber.stop()
 
     def start_ffmpeg_detect(self):
         detect_cmd = [c for c in self.config.ffmpeg_cmds if "detect" in c["roles"]][0]

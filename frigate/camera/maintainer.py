@@ -349,25 +349,27 @@ class CameraMaintainer(threading.Thread):
                 pass
 
     def __current_camera(self, name: str, previous: HostedCamera) -> HostedCamera:
-        """The camera's restart spec, built from the latest saved config."""
+        """The camera's restart spec, with its config as of the latest save.
+
+        The model, the detection input and the frame slots stay as they were
+        allocated at start, and the other processes keep reading frames with
+        the size they started with, so a camera whose detect size changed
+        since restarts with its previous config until Frigate restarts.
+        """
         config = self.config_holder.config if self.config_holder else None
         camera_config = config.cameras.get(name) if config else None
-        if config is None or camera_config is None:
+        if camera_config is None:
             return previous
 
-        model = config.model_for_camera(name)
-        if model.scene not in self.detection_queues:
-            return HostedCamera(**{**previous.__dict__, "config": camera_config})
+        if camera_config.frame_shape_yuv != previous.config.frame_shape_yuv:
+            logger.warning(
+                "Restarting %s with its previous config, its new detect size "
+                "takes effect when Frigate restarts",
+                name,
+            )
+            return previous
 
-        return HostedCamera(
-            **{
-                **previous.__dict__,
-                "config": camera_config,
-                "model_config": model,
-                "labelmap": model.merged_labelmap,
-                "detection_queue": self.detection_queues[model.scene],
-            }
-        )
+        return HostedCamera(**{**previous.__dict__, "config": camera_config})
 
     def __restart_failed_cameras(self) -> None:
         """Restart cameras whose host died or whose threads stopped on their own."""
@@ -385,12 +387,10 @@ class CameraMaintainer(threading.Thread):
                 continue
 
             if host.is_alive():
-                logger.error(
-                    "Restarting %s, which stopped unexpectedly", ", ".join(cameras)
-                )
+                logger.error("%s stopped unexpectedly", ", ".join(cameras))
             else:
                 logger.error(
-                    "Camera host for %s exited unexpectedly (exit code %s), restarting it",
+                    "Camera host for %s exited unexpectedly (exit code %s)",
                     ", ".join(cameras),
                     host.exitcode,
                 )
@@ -400,6 +400,14 @@ class CameraMaintainer(threading.Thread):
             for name in cameras:
                 self.host_restart_times[name] = now
                 camera = self.__current_camera(name, self.hosted_cameras[name])
+                if not camera.config.enabled_in_config:
+                    # like at startup, a camera disabled in the config doesn't run
+                    logger.info("Not restarting %s, it is disabled in the config", name)
+                    self.camera_hosts.pop(name)
+                    self.hosted_cameras.pop(name)
+                    self.camera_done_events.pop(name)
+                    continue
+
                 restarted.append(
                     HostedCamera(
                         **{
@@ -409,11 +417,19 @@ class CameraMaintainer(threading.Thread):
                         }
                     )
                 )
-            self.__start_camera_host(restarted)
+            if restarted:
+                self.__start_camera_host(restarted)
 
             # a host whose cameras all failed exits on its own
             if host not in self.camera_hosts.values():
                 host.join(timeout=10)
+                if host.is_alive():
+                    logger.warning(
+                        "Camera host %s didn't exit, forcing termination", host.name
+                    )
+                    host.terminate()
+                    host.join()
+                    self.__stop_orphaned_children(host)
                 self.host_children.pop(host, None)
 
     def __stop_hosted_cameras(self, cameras: list[str]) -> None:

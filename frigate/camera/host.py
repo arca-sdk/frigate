@@ -86,36 +86,27 @@ class CameraHost(FrigateProcess):
                 camera, watchdog, tracker = entry
                 for thread in (watchdog, tracker):
                     thread.join(timeout=0.5 / len(running))
-                alive = [t for t in (watchdog, tracker) if t.is_alive()]
+                stopped = [
+                    f"{kind} thread"
+                    for kind, thread in (("capture", watchdog), ("tracking", tracker))
+                    if not thread.is_alive()
+                ]
 
-                if len(alive) == 1 and not camera.stop_event.is_set():
-                    # one thread stopped on its own: stop the other as well so
+                if stopped and not camera.stop_event.is_set():
+                    # a thread stopped on its own: stop the other as well so
                     # the camera is reported done and the maintainer restarts it
                     logger.error(
-                        "%s: the %s thread stopped unexpectedly, stopping the camera",
+                        "%s: %s stopped unexpectedly, stopping the camera",
                         camera.config.name,
-                        "tracking" if alive[0] is watchdog else "capture",
+                        " and ".join(stopped),
                     )
                     camera.stop_event.set()
 
-                if not alive:
-                    self._stop_ffmpeg(camera, watchdog)
+                if len(stopped) == 2:
                     camera.done_event.set()
                     running.remove(entry)
 
         logger.info("All hosted cameras stopped, exiting")
-
-    @staticmethod
-    def _stop_ffmpeg(camera: HostedCamera, watchdog: CameraWatchdog) -> None:
-        """Stop ffmpeg processes a crashed watchdog left behind.
-
-        ffmpeg runs in its own session, so nothing else stops it; after a
-        clean exit the watchdog already did and this does nothing.
-        """
-        try:
-            watchdog.stop_all_ffmpeg()
-        except Exception:
-            logger.exception("Failed to stop ffmpeg for %s", camera.config.name)
 
     def _start_camera(
         self, camera: HostedCamera

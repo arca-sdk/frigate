@@ -224,11 +224,12 @@ def track_camera(
         region_grid,
     )
 
-    # empty the frame queue
+    # empty the frame queue, keeping the frame slots: the camera maintainer
+    # owns them and reuses them when it restarts a hosted camera
     logger.info(f"{config.name}: emptying frame queue")
     while not frame_queue.empty():
         (frame_name, _) = frame_queue.get(False)
-        frame_manager.delete(frame_name)
+        frame_manager.close(frame_name)
 
     logger.info(f"{config.name}: exiting subprocess")
 
