@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
+from norfair.tracker import Tracker
 
 from frigate.camera import PTZMetrics
 from frigate.config import FrigateConfig
@@ -334,6 +335,24 @@ class TestNativeObjectTracker(unittest.TestCase):
         config.onvif.autotracking.enabled_in_config = True
         tracker = NorfairTracker(config, PTZMetrics())
         self.assertFalse(tracker.use_native)
+
+    def test_autotracking_config_change_switches_tracker(self):
+        config = self.camera_config()
+        tracker = NorfairTracker(config, PTZMetrics())
+        self.assertTrue(tracker.use_native)
+
+        # the camera process applies onvif config updates through sync_trackers
+        config.onvif.autotracking.enabled_in_config = True
+        tracker.sync_trackers()
+        self.assertFalse(tracker.use_native)
+        self.assertTrue(all(isinstance(t, Tracker) for t in tracker._all_trackers()))
+
+        config.onvif.autotracking.enabled_in_config = False
+        tracker.sync_trackers()
+        self.assertTrue(tracker.use_native)
+        for frame_time, detections in tracker_scene(2, 30, max_objects=5):
+            tracker.match_and_update("frame", frame_time, detections)
+        self.assertTrue(tracker.tracked_objects)
 
     def test_clear_forgets_objects(self):
         config = self.camera_config()
