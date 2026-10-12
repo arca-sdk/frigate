@@ -1,0 +1,14 @@
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "frigate-native"
+version = "0.1.0"
+description = "Rust implementations of Frigate's per-frame hot paths"
+requires-python = ">=3.11"
+license = "MIT"
+
+[tool.maturin]
+module-name = "frigate_native"
+features = ["pyo3/extension-module"]

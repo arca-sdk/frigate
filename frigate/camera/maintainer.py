@@ -2,18 +2,24 @@
 
 import logging
 import multiprocessing as mp
+import os
 import threading
+import time
 from multiprocessing import Queue
 from multiprocessing.managers import DictProxy, SyncManager
 from multiprocessing.synchronize import Event as MpEvent
 
+import psutil
+
 from frigate.camera import CameraMetrics, PTZMetrics
+from frigate.camera.host import CameraHost, HostedCamera
 from frigate.config import FrigateConfig
 from frigate.config.camera import CameraConfig
 from frigate.config.camera.updater import (
     CameraConfigUpdateEnum,
     CameraConfigUpdateSubscriber,
 )
+from frigate.config.holder import ConfigHolder
 from frigate.const import REPLAY_CAMERA_PREFIX
 from frigate.models import Regions
 from frigate.object_detection.util import detection_frame_size
@@ -24,6 +30,34 @@ from frigate.util.services import calculate_shm_requirements
 from frigate.video import CameraCapture, CameraTracker
 
 logger = logging.getLogger(__name__)
+
+# a camera whose host died is restarted at most this often
+HOST_RESTART_INTERVAL = 30
+
+# limits how many cameras one crash can take down, while still sharing the
+# memory of the Python runtime and libraries between cameras
+DEFAULT_CAMERAS_PER_PROCESS = 8
+
+
+def get_cameras_per_process() -> int:
+    """Cameras per camera host process (FRIGATE_CAMERAS_PER_PROCESS).
+
+    0 runs every camera as two processes, capture and tracking. N > 0 runs up
+    to N cameras as threads of each camera host process.
+    """
+    value = os.environ.get("FRIGATE_CAMERAS_PER_PROCESS", "")
+    if not value.strip():
+        return DEFAULT_CAMERAS_PER_PROCESS
+
+    try:
+        return max(0, int(value))
+    except ValueError:
+        logger.warning(
+            "Invalid FRIGATE_CAMERAS_PER_PROCESS %r, using %s cameras per process",
+            value,
+            DEFAULT_CAMERAS_PER_PROCESS,
+        )
+        return DEFAULT_CAMERAS_PER_PROCESS
 
 
 class CameraMaintainer(threading.Thread):
@@ -36,6 +70,7 @@ class CameraMaintainer(threading.Thread):
         ptz_metrics: dict[str, PTZMetrics],
         stop_event: MpEvent,
         metrics_manager: SyncManager,
+        config_holder: ConfigHolder | None = None,
     ):
         super().__init__(name="camera_processor")
         self.config = config
@@ -60,6 +95,19 @@ class CameraMaintainer(threading.Thread):
         self.capture_processes: dict[str, mp.Process] = {}
         self.camera_stop_events: dict[str, MpEvent] = {}
         self.metrics_manager = metrics_manager
+
+        # camera host mode, see frigate.camera.host
+        self.cameras_per_process = get_cameras_per_process()
+        self.camera_hosts: dict[str, CameraHost] = {}
+        self.hosted_cameras: dict[str, HostedCamera] = {}
+        self.camera_done_events: dict[str, MpEvent] = {}
+        self.host_restart_times: dict[str, float] = {}
+        self.host_count = 0
+        # (pid, create time) of each host's children, to stop the ffmpeg
+        # processes a crashed host leaves behind (they run in their own session)
+        self.host_children: dict[CameraHost, set[tuple[int, float]]] = {}
+        # the config as of the latest save, for rebuilding restarted cameras
+        self.config_holder = config_holder
 
     def __ensure_camera_stop_event(self, camera: str) -> MpEvent:
         camera_stop_event = self.camera_stop_events.get(camera)
@@ -108,6 +156,32 @@ class CameraMaintainer(threading.Thread):
 
         return int(shm_stats["shm_frame_count"])
 
+    def __prepare_runtime_camera(self, name: str, config: CameraConfig) -> None:
+        """Create the state a camera added at runtime needs before starting."""
+        model = self.config.model_for_camera(name)
+        self.camera_metrics[name] = CameraMetrics(self.metrics_manager)
+        self.ptz_metrics[name] = PTZMetrics()
+        self.region_grids[name] = get_camera_regions_grid(
+            name,
+            config.detect,
+            max(model.width, model.height),
+        )
+
+        try:
+            UntrackedSharedMemory(name=f"out-{name}", create=True, size=20 * 6 * 4)
+            UntrackedSharedMemory(
+                name=name,
+                create=True,
+                size=detection_frame_size(model),
+            )
+        except FileExistsError:
+            pass
+
+    def __create_frame_slots(self, config: CameraConfig, count: int) -> None:
+        frame_size = config.frame_shape_yuv[0] * config.frame_shape_yuv[1]
+        for i in range(count):
+            self.frame_manager.create(f"{config.name}_frame{i}", frame_size)
+
     def __start_camera_processor(
         self, name: str, config: CameraConfig, runtime: bool = False
     ) -> None:
@@ -119,23 +193,7 @@ class CameraMaintainer(threading.Thread):
         model = self.config.model_for_camera(name)
 
         if runtime:
-            self.camera_metrics[name] = CameraMetrics(self.metrics_manager)
-            self.ptz_metrics[name] = PTZMetrics()
-            self.region_grids[name] = get_camera_regions_grid(
-                name,
-                config.detect,
-                max(model.width, model.height),
-            )
-
-            try:
-                UntrackedSharedMemory(name=f"out-{name}", create=True, size=20 * 6 * 4)
-                UntrackedSharedMemory(
-                    name=name,
-                    create=True,
-                    size=detection_frame_size(model),
-                )
-            except FileExistsError:
-                pass
+            self.__prepare_runtime_camera(name, config)
 
         camera_process = CameraTracker(
             config,
@@ -165,9 +223,7 @@ class CameraMaintainer(threading.Thread):
 
         # pre-create shms
         count = 10 if runtime else self.shm_count
-        for i in range(count):
-            frame_size = config.frame_shape_yuv[0] * config.frame_shape_yuv[1]
-            self.frame_manager.create(f"{config.name}_frame{i}", frame_size)
+        self.__create_frame_slots(config, count)
 
         capture_process = CameraCapture(
             config,
@@ -198,6 +254,212 @@ class CameraMaintainer(threading.Thread):
                 )
                 capture_process.terminate()
                 capture_process.join()
+
+    def __start_cameras(
+        self, cameras: list[tuple[str, CameraConfig]], runtime: bool = False
+    ) -> None:
+        """Start cameras as processes, or as threads of camera hosts."""
+        if self.cameras_per_process == 0:
+            for name, config in cameras:
+                self.__start_camera_processor(name, config, runtime=runtime)
+                self.__start_camera_capture(name, config, runtime=runtime)
+            return
+
+        enabled = []
+        for name, config in cameras:
+            if not config.enabled_in_config:
+                logger.info("Camera processor not started for disabled camera %s", name)
+                continue
+            enabled.append((name, config))
+
+        for i in range(0, len(enabled), self.cameras_per_process):
+            hosted = []
+            for name, config in enabled[i : i + self.cameras_per_process]:
+                if runtime:
+                    self.__prepare_runtime_camera(name, config)
+                count = 10 if runtime else self.shm_count
+                self.__create_frame_slots(config, count)
+                model = self.config.model_for_camera(name)
+                hosted.append(
+                    HostedCamera(
+                        config=config,
+                        model_config=model,
+                        labelmap=model.merged_labelmap,
+                        detection_queue=self.detection_queues[model.scene],
+                        camera_metrics=self.camera_metrics[name],
+                        ptz_metrics=self.ptz_metrics[name],
+                        region_grid=self.region_grids[name],
+                        shm_frame_count=count,
+                        stop_event=self.__ensure_camera_stop_event(name),
+                        done_event=mp.Event(),
+                    )
+                )
+            self.__start_camera_host(hosted)
+
+    def __start_camera_host(self, hosted: list[HostedCamera]) -> None:
+        self.host_count += 1
+        host = CameraHost(
+            str(self.host_count),
+            hosted,
+            self.detected_frames_queue,
+            self.stop_event,
+            self.config.logger,
+        )
+        host.start()
+
+        names = []
+        for camera in hosted:
+            name = camera.config.name
+            assert name is not None
+            names.append(name)
+            self.camera_hosts[name] = host
+            self.hosted_cameras[name] = camera
+            self.camera_done_events[name] = camera.done_event
+        logger.info("Camera host started for %s: %s", ", ".join(names), host.pid)
+
+    def __record_host_children(self) -> None:
+        for host in set(self.camera_hosts.values()):
+            if host.pid is None or not host.is_alive():
+                continue
+
+            try:
+                children = psutil.Process(host.pid).children(recursive=True)
+                self.host_children[host] = {(c.pid, c.create_time()) for c in children}
+            except psutil.Error:
+                continue
+
+    def __stop_orphaned_children(self, host: CameraHost) -> None:
+        """Stop the processes a dead host started, like its ffmpeg."""
+        orphans = []
+        for pid, create_time in self.host_children.pop(host, set()):
+            try:
+                process = psutil.Process(pid)
+                # the pid may have been reused by an unrelated process
+                if process.create_time() == create_time:
+                    process.terminate()
+                    orphans.append(process)
+            except psutil.Error:
+                continue
+
+        _, alive = psutil.wait_procs(orphans, timeout=5)
+        for process in alive:
+            try:
+                process.kill()
+            except psutil.Error:
+                pass
+
+    def __current_camera(self, name: str, previous: HostedCamera) -> HostedCamera:
+        """The camera's restart spec, with its config as of the latest save.
+
+        The model, the detection input and the frame slots stay as they were
+        allocated at start, and the other processes keep reading frames with
+        the size they started with, so a camera whose detect size changed
+        since restarts with its previous config until Frigate restarts.
+        """
+        config = self.config_holder.config if self.config_holder else None
+        camera_config = config.cameras.get(name) if config else None
+        if camera_config is None:
+            return previous
+
+        if camera_config.frame_shape_yuv != previous.config.frame_shape_yuv:
+            logger.warning(
+                "Restarting %s with its previous config, its new detect size "
+                "takes effect when Frigate restarts",
+                name,
+            )
+            return previous
+
+        return HostedCamera(**{**previous.__dict__, "config": camera_config})
+
+    def __restart_failed_cameras(self) -> None:
+        """Restart cameras whose host died or whose threads stopped on their own."""
+        now = time.monotonic()
+        failed: dict[CameraHost, list[str]] = {}
+        for name, host in self.camera_hosts.items():
+            if not host.is_alive() or self.camera_done_events[name].is_set():
+                failed.setdefault(host, []).append(name)
+
+        for host, cameras in failed.items():
+            if any(
+                now - self.host_restart_times.get(name, 0) < HOST_RESTART_INTERVAL
+                for name in cameras
+            ):
+                continue
+
+            if host.is_alive():
+                logger.error("%s stopped unexpectedly", ", ".join(cameras))
+            else:
+                logger.error(
+                    "Camera host for %s exited unexpectedly (exit code %s)",
+                    ", ".join(cameras),
+                    host.exitcode,
+                )
+                self.__stop_orphaned_children(host)
+
+            restarted = []
+            for name in cameras:
+                self.host_restart_times[name] = now
+                camera = self.__current_camera(name, self.hosted_cameras[name])
+                if not camera.config.enabled_in_config:
+                    # like at startup, a camera disabled in the config doesn't run
+                    logger.info("Not restarting %s, it is disabled in the config", name)
+                    self.camera_hosts.pop(name)
+                    self.hosted_cameras.pop(name)
+                    self.camera_done_events.pop(name)
+                    continue
+
+                restarted.append(
+                    HostedCamera(
+                        **{
+                            **camera.__dict__,
+                            "stop_event": self.__ensure_camera_stop_event(name),
+                            "done_event": mp.Event(),
+                        }
+                    )
+                )
+            if restarted:
+                self.__start_camera_host(restarted)
+
+            # a host whose cameras all failed exits on its own
+            if host not in self.camera_hosts.values():
+                host.join(timeout=10)
+                if host.is_alive():
+                    logger.warning(
+                        "Camera host %s didn't exit, forcing termination", host.name
+                    )
+                    host.terminate()
+                    host.join()
+                    self.__stop_orphaned_children(host)
+                self.host_children.pop(host, None)
+
+    def __stop_hosted_cameras(self, cameras: list[str]) -> None:
+        """Stop hosted cameras, then any host left without cameras."""
+        hosts = {self.camera_hosts[c] for c in cameras if c in self.camera_hosts}
+        for camera in cameras:
+            if camera in self.camera_hosts:
+                logger.info("Waiting for %s to stop", camera)
+                self.camera_stop_events[camera].set()
+
+        deadline = time.monotonic() + 20
+        for camera in cameras:
+            done_event = self.camera_done_events.pop(camera, None)
+            if self.camera_hosts.pop(camera, None) is None or done_event is None:
+                continue
+            self.hosted_cameras.pop(camera, None)
+            if not done_event.wait(timeout=max(0.0, deadline - time.monotonic())):
+                logger.warning("%s didn't stop within 20 seconds", camera)
+
+        for host in hosts:
+            if host in self.camera_hosts.values():
+                continue
+            host.join(timeout=10)
+            if host.is_alive():
+                logger.warning(
+                    "Camera host %s didn't exit, forcing termination", host.name
+                )
+                host.terminate()
+                host.join()
+            self.host_children.pop(host, None)
 
     def __unlink_camera_frame_slots(self, camera: str) -> None:
         """Drop the camera's per-frame YUV SHM segments from this
@@ -239,11 +501,13 @@ class CameraMaintainer(threading.Thread):
         self.__init_historical_regions()
 
         # start camera processes
-        for camera, config in self.config.cameras.items():
-            self.__start_camera_processor(camera, config)
-            self.__start_camera_capture(camera, config)
+        self.__start_cameras(list(self.config.cameras.items()))
 
         while not self.stop_event.wait(1):
+            if self.camera_hosts:
+                self.__record_host_children()
+                self.__restart_failed_cameras()
+
             updates = self.update_subscriber.check_for_updates()
 
             for update_type, updated_cameras in updates.items():
@@ -252,21 +516,17 @@ class CameraMaintainer(threading.Thread):
                         if (
                             camera in self.camera_processes
                             or camera in self.capture_processes
+                            or camera in self.camera_hosts
                         ):
                             continue
 
-                        self.__start_camera_processor(
-                            camera,
-                            self.update_subscriber.camera_configs[camera],
-                            runtime=True,
-                        )
-                        self.__start_camera_capture(
-                            camera,
-                            self.update_subscriber.camera_configs[camera],
+                        self.__start_cameras(
+                            [(camera, self.update_subscriber.camera_configs[camera])],
                             runtime=True,
                         )
                 elif update_type == CameraConfigUpdateEnum.remove.name:
                     for camera in updated_cameras:
+                        self.__stop_hosted_cameras([camera])
                         self.__stop_camera_capture_process(camera)
                         self.__stop_camera_process(camera)
                         self.__unlink_camera_frame_slots(camera)
@@ -293,6 +553,7 @@ class CameraMaintainer(threading.Thread):
                         if (
                             camera not in self.camera_processes
                             and camera not in self.capture_processes
+                            and camera not in self.camera_hosts
                         ):
                             continue
 
@@ -300,14 +561,17 @@ class CameraMaintainer(threading.Thread):
                         # new subprocesses spawn with current args
                         new_config.recreate_ffmpeg_cmds()
 
+                        self.__stop_hosted_cameras([camera])
                         self.__stop_camera_capture_process(camera)
                         self.__stop_camera_process(camera)
                         self.__unlink_camera_frame_slots(camera)
                         self.capture_processes.pop(camera, None)
                         self.camera_processes.pop(camera, None)
 
-                        self.__start_camera_processor(camera, new_config, runtime=True)
-                        self.__start_camera_capture(camera, new_config, runtime=True)
+                        self.__start_cameras([(camera, new_config)], runtime=True)
+
+        # ensure the hosted cameras are done
+        self.__stop_hosted_cameras(list(self.camera_hosts.keys()))
 
         # ensure the capture processes are done
         for camera in self.capture_processes.keys():

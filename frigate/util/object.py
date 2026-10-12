@@ -29,6 +29,7 @@ from frigate.util.image import (
     yuv_region_2_rgb,
     yuv_region_2_yuv,
 )
+from frigate.util.native import native
 
 logger = logging.getLogger(__name__)
 
@@ -390,6 +391,16 @@ def get_cluster_boundary(box, min_region):
 
 
 def get_cluster_candidates(frame_shape, min_region, boxes):
+    if native is not None:
+        clusters = native.cluster_candidates(
+            frame_shape[0], frame_shape[1], min_region, boxes
+        )
+        if clusters is not None:
+            # de-duplicate through a set like the Python version below so the
+            # returned clusters keep the exact same order
+            unique = {tuple(c) for c in clusters}
+            return [list(tup) for tup in unique]
+
     # and create a cluster of other boxes using it's max region size
     # only include boxes where the region is an appropriate(except the region could possibly be smaller?)
     # size in the cluster. in order to be in the cluster, the furthest corner needs to be within x,y offset
@@ -493,6 +504,18 @@ def reduce_detections(
     all_detections: list[tuple[Any]],
 ) -> list[tuple[Any]]:
     """Take a list of detections and reduce overlaps to create a list of confident detections."""
+    if native is not None and isinstance(all_detections, list):
+        indices = native.reduce_detections(
+            frame_shape[0],
+            frame_shape[1],
+            all_detections,
+            LABEL_NMS_MAP,
+            LABEL_NMS_DEFAULT,
+            LABEL_CONSOLIDATION_MAP,
+            LABEL_CONSOLIDATION_DEFAULT,
+        )
+        if indices is not None:
+            return [all_detections[i] for i in indices]
 
     def reduce_overlapping_detections(detections: list[tuple[Any]]) -> list[tuple[Any]]:
         """apply non-maxima suppression to suppress weak, overlapping bounding boxes."""

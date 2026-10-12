@@ -8,8 +8,23 @@ from frigate.camera import PTZMetrics
 from frigate.config.config import RuntimeMotionConfig
 from frigate.motion import MotionDetector
 from frigate.util.image import grab_cv2_contours
+from frigate.util.native import native
 
 logger = logging.getLogger(__name__)
+
+
+def gaussian_kernel(sigma: float, radius: int) -> list[float]:
+    """Return the kernel scipy's gaussian_filter applies, for the Rust blur."""
+    try:
+        from scipy.ndimage._filters import _gaussian_kernel1d
+
+        weights = _gaussian_kernel1d(sigma, 0, radius)[::-1]
+    except ImportError:
+        x = np.arange(-radius, radius + 1)
+        phi_x = np.exp(-0.5 / (sigma * sigma) * x**2)
+        weights = (phi_x / phi_x.sum())[::-1]
+
+    return [float(w) for w in weights]
 
 
 class ImprovedMotionDetector(MotionDetector):
@@ -41,6 +56,7 @@ class ImprovedMotionDetector(MotionDetector):
         self.save_images = False
         self.calibrating = True
         self.blur_radius = blur_radius
+        self.blur_weights = gaussian_kernel(1, blur_radius)
         self.interpolation = interpolation
         self.contrast_values = np.zeros((contrast_frame_history, 2), np.uint8)
         self.contrast_values[:, 1:2] = 255
@@ -72,67 +88,38 @@ class ImprovedMotionDetector(MotionDetector):
                 )
             ]
 
-        gray = frame[0 : self.frame_shape[0], 0 : self.frame_shape[1]]
+        if (
+            native is not None
+            and not self.save_images
+            and self.interpolation == cv2.INTER_NEAREST
+            and frame.dtype == np.uint8
+            and frame.ndim == 2
+            and frame.flags.c_contiguous
+        ):
+            # same pixel pipeline in Rust; contours stay in OpenCV below
+            resized_frame, thresh_dilated, self.contrast_values_index = (
+                native.motion_preprocess(
+                    frame,
+                    self.frame_shape[0],
+                    self.frame_shape[1],
+                    self.motion_frame_size[0],
+                    self.motion_frame_size[1],
+                    self.config.improve_contrast,
+                    self.contrast_values,
+                    self.contrast_values_index,
+                    self.native_mask,
+                    self.blur_weights,
+                    self.avg_frame,
+                    self.config.threshold,
+                )
+            )
 
-        # resize frame
-        resized_frame = cv2.resize(
-            gray,
-            dsize=(self.motion_frame_size[1], self.motion_frame_size[0]),
-            interpolation=self.interpolation,
-        )
+            if self.calibrating:
+                self.frame_counter += 1
+            debug_frames: list[np.ndarray] = []
+        else:
+            resized_frame, thresh_dilated, debug_frames = self._prepare_frames(frame)
 
-        if self.save_images:
-            resized_saved = resized_frame.copy()
-
-        # Improve contrast
-        if self.config.improve_contrast:
-            # TODO tracking moving average of min/max to avoid sudden contrast changes
-            min_value = np.percentile(resized_frame, 4).astype(np.uint8)
-            max_value = np.percentile(resized_frame, 96).astype(np.uint8)
-            # skip contrast calcs if the image is a single color
-            if min_value < max_value:
-                # keep track of the last 50 contrast values
-                self.contrast_values[self.contrast_values_index] = [
-                    min_value,
-                    max_value,
-                ]
-                self.contrast_values_index += 1
-                if self.contrast_values_index == len(self.contrast_values):
-                    self.contrast_values_index = 0
-
-                avg_min, avg_max = np.mean(self.contrast_values, axis=0)
-
-                resized_frame = np.clip(resized_frame, avg_min, avg_max)
-                resized_frame = (
-                    ((resized_frame - avg_min) / (avg_max - avg_min)) * 255
-                ).astype(np.uint8)
-
-        if self.save_images:
-            contrasted_saved = resized_frame.copy()
-
-        # mask frame
-        # this has to come after contrast improvement
-        # Setting masked pixels to zero, to match the average frame at startup
-        resized_frame[self.mask] = [0]
-
-        resized_frame = gaussian_filter(resized_frame, sigma=1, radius=self.blur_radius)
-
-        if self.save_images:
-            blurred_saved = resized_frame.copy()
-
-        if self.save_images or self.calibrating:
-            self.frame_counter += 1
-        # compare to average
-        frameDelta = cv2.absdiff(resized_frame, cv2.convertScaleAbs(self.avg_frame))
-
-        # compute the threshold image for the current frame
-        thresh = cv2.threshold(
-            frameDelta, self.config.threshold, 255, cv2.THRESH_BINARY
-        )[1]
-
-        # dilate the thresholded image to fill in holes, then find contours
-        # on thresholded image
-        thresh_dilated = cv2.dilate(thresh, None, iterations=1)  # type: ignore[call-overload]
         contours = cv2.findContours(
             thresh_dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
@@ -222,11 +209,7 @@ class ImprovedMotionDetector(MotionDetector):
                     2,
                 )
             frames = [
-                cv2.cvtColor(resized_saved, cv2.COLOR_GRAY2BGR),
-                cv2.cvtColor(contrasted_saved, cv2.COLOR_GRAY2BGR),
-                cv2.cvtColor(blurred_saved, cv2.COLOR_GRAY2BGR),
-                cv2.cvtColor(frameDelta, cv2.COLOR_GRAY2BGR),
-                cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR),
+                *[cv2.cvtColor(f, cv2.COLOR_GRAY2BGR) for f in debug_frames],
                 thresh_dilated,
             ]
             cv2.imwrite(
@@ -258,6 +241,82 @@ class ImprovedMotionDetector(MotionDetector):
 
         return motion_boxes
 
+    def _prepare_frames(
+        self, frame: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, list[np.ndarray]]:
+        """Run the pixel pipeline in Python.
+
+        Returns the blurred frame, the dilated threshold image and, when
+        saving debug images, the intermediate frames.
+        """
+        debug_frames: list[np.ndarray] = []
+        gray = frame[0 : self.frame_shape[0], 0 : self.frame_shape[1]]
+
+        # resize frame
+        resized_frame = cv2.resize(
+            gray,
+            dsize=(self.motion_frame_size[1], self.motion_frame_size[0]),
+            interpolation=self.interpolation,
+        )
+
+        if self.save_images:
+            debug_frames.append(resized_frame.copy())
+
+        # Improve contrast
+        if self.config.improve_contrast:
+            # TODO tracking moving average of min/max to avoid sudden contrast changes
+            min_value = np.percentile(resized_frame, 4).astype(np.uint8)
+            max_value = np.percentile(resized_frame, 96).astype(np.uint8)
+            # skip contrast calcs if the image is a single color
+            if min_value < max_value:
+                # keep track of the last 50 contrast values
+                self.contrast_values[self.contrast_values_index] = [
+                    min_value,
+                    max_value,
+                ]
+                self.contrast_values_index += 1
+                if self.contrast_values_index == len(self.contrast_values):
+                    self.contrast_values_index = 0
+
+                avg_min, avg_max = np.mean(self.contrast_values, axis=0)
+
+                resized_frame = np.clip(resized_frame, avg_min, avg_max)
+                resized_frame = (
+                    ((resized_frame - avg_min) / (avg_max - avg_min)) * 255
+                ).astype(np.uint8)
+
+        if self.save_images:
+            debug_frames.append(resized_frame.copy())
+
+        # mask frame
+        # this has to come after contrast improvement
+        # Setting masked pixels to zero, to match the average frame at startup
+        resized_frame[self.mask] = [0]
+
+        resized_frame = gaussian_filter(resized_frame, sigma=1, radius=self.blur_radius)
+
+        if self.save_images:
+            debug_frames.append(resized_frame.copy())
+
+        if self.save_images or self.calibrating:
+            self.frame_counter += 1
+        # compare to average
+        frameDelta = cv2.absdiff(resized_frame, cv2.convertScaleAbs(self.avg_frame))
+
+        # compute the threshold image for the current frame
+        thresh = cv2.threshold(
+            frameDelta, self.config.threshold, 255, cv2.THRESH_BINARY
+        )[1]
+
+        if self.save_images:
+            debug_frames.extend([frameDelta, thresh])
+
+        # dilate the thresholded image to fill in holes, then find contours
+        # on thresholded image
+        thresh_dilated = cv2.dilate(thresh, None, iterations=1)  # type: ignore[call-overload]
+
+        return resized_frame, thresh_dilated, debug_frames
+
     def update_mask(self) -> None:
         resized_mask = cv2.resize(
             self.config.rasterized_mask,
@@ -265,6 +324,12 @@ class ImprovedMotionDetector(MotionDetector):
             interpolation=cv2.INTER_AREA,
         )
         self.mask = np.where(resized_mask == [0])
+        # the Rust pipeline takes the mask as an image, 0 where masked
+        self.native_mask: np.ndarray | None = (
+            np.ascontiguousarray(resized_mask != 0, dtype=np.uint8)
+            if len(self.mask[0]) > 0
+            else None
+        )
 
         # Reset motion detection state when mask changes
         # so motion detection can quickly recalibrate with the new mask

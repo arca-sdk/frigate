@@ -111,6 +111,52 @@ def get_docker_memlimit_bytes() -> int:
     return -1
 
 
+# (monotonic time, cpu seconds) of camera host threads at the previous call
+_thread_cpu_times: dict[int, tuple[float, float]] = {}
+
+
+def get_thread_cpu_stats(
+    process: psutil.Process, cmdline: str, mem_pct: str, clk_tck: int
+) -> dict[str, dict]:
+    """CPU usage of each thread of a camera host process, keyed by thread id.
+
+    Cameras running as threads report their thread ids as their process ids,
+    so the per camera CPU figures keep working.
+    """
+    usages: dict[str, dict] = {}
+    now = time.monotonic()
+
+    with open("/proc/uptime") as f:
+        system_uptime_sec = float(f.read().split()[0])
+
+    for thread in process.threads():
+        total = thread.user_time + thread.system_time
+        previous = _thread_cpu_times.get(thread.id)
+        _thread_cpu_times[thread.id] = (now, total)
+
+        cpu = 0.0
+        if previous is not None and now > previous[0]:
+            cpu = round((total - previous[1]) / (now - previous[0]) * 100, 1)
+
+        try:
+            with open(f"/proc/{process.pid}/task/{thread.id}/stat") as f:
+                # fields after the parenthesized name start at field 3
+                start_ticks = int(f.read().rsplit(")", 1)[1].split()[19])
+        except (OSError, IndexError, ValueError):
+            continue
+
+        elapsed = system_uptime_sec - start_ticks / clk_tck
+        cpu_average = total * 100 / elapsed if elapsed > 0 else 0.0
+        usages[str(thread.id)] = {
+            "cpu": str(cpu),
+            "cpu_average": str(round(cpu_average, 2)),
+            "mem": mem_pct,
+            "cmdline": f"{cmdline} thread {thread.id}",
+        }
+
+    return usages
+
+
 def get_cpu_stats() -> dict[str, dict]:
     """Get cpu usages for each process id"""
     usages = {}
@@ -170,8 +216,17 @@ def get_cpu_stats() -> dict[str, dict]:
                 "mem": f"{mem_pct}",
                 "cmdline": clean_camera_user_pass(cmdline),
             }
+
+            if cmdline.startswith("frigate.cameras:"):
+                usages.update(
+                    get_thread_cpu_stats(process, cmdline, f"{mem_pct}", clk_tck)
+                )
         except Exception:
             continue
+
+    # forget threads that are gone
+    for tid in [t for t in _thread_cpu_times if str(t) not in usages]:
+        del _thread_cpu_times[tid]
 
     return usages
 

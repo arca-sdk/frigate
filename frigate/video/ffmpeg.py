@@ -46,6 +46,14 @@ logger = logging.getLogger(__name__)
 RECORD_GRACE_SECONDS = 90
 
 
+@dataclass
+class FrameTime:
+    """Time of the last frame read, written by the capture thread and read by
+    the watchdog thread of the same process."""
+
+    value: float = 0.0
+
+
 def capture_frames(
     ffmpeg_process: sp.Popen[Any],
     config: CameraConfig,
@@ -56,7 +64,7 @@ def capture_frames(
     frame_queue,
     fps: Value,
     skipped_fps: Value,
-    current_frame: Value,
+    current_frame: FrameTime,
     stop_event: MpEvent,
 ) -> None:
     frame_size = frame_shape[0] * frame_shape[1]
@@ -79,7 +87,10 @@ def capture_frames(
         frame_name = f"{config.name}_frame{frame_index}"
         frame_buffer = frame_manager.write(frame_name)
         try:
-            frame_buffer[:] = ffmpeg_process.stdout.read(frame_size)
+            # read straight into shared memory rather than through a temporary
+            # bytes object that then has to be copied
+            if ffmpeg_process.stdout.readinto(frame_buffer) != frame_size:
+                raise EOFError("incomplete frame")
         except Exception:
             # shutdown has been initiated
             if stop_event.is_set():
@@ -135,7 +146,7 @@ class CameraWatchdog(threading.Thread):
         self,
         config: CameraConfig,
         shm_frame_count: int,
-        frame_queue: Queue,
+        frame_queue: "Queue | queue.Queue",
         camera_fps,
         skipped_fps,
         ffmpeg_pid,
@@ -143,9 +154,14 @@ class CameraWatchdog(threading.Thread):
         reconnects,
         detection_frame,
         stop_event,
+        capture_thread_id=None,
     ):
         threading.Thread.__init__(self)
+        self.name = f"watchdog:{config.name}"
         self.logger = logging.getLogger(f"watchdog.{config.name}")
+        # when the camera runs as threads of a shared process, its capture CPU
+        # is reported per thread, so publish the capture thread's id
+        self.capture_thread_id = capture_thread_id
         self.config = config
         self.shm_frame_count = shm_frame_count
         self.capture_thread = None
@@ -351,6 +367,17 @@ class CameraWatchdog(threading.Thread):
             self._grant_restart_grace([STREAM_TYPE_SUB], datetime.now().astimezone(UTC))
 
     def run(self) -> None:
+        try:
+            self._watch()
+        finally:
+            # also after an error: ffmpeg runs in its own session, and the log
+            # pipe's thread keeps the process alive until the pipe is closed
+            self.stop_all_ffmpeg()
+            self.logpipe.close()
+            self.config_subscriber.stop()
+            self.segment_subscriber.stop()
+
+    def _watch(self) -> None:
         if self._update_enabled_state():
             self.start_all_ffmpeg()
             # If recording is enabled at startup, set the grace period timer
@@ -616,11 +643,6 @@ class CameraWatchdog(threading.Thread):
                 if self.stalls:
                     self.stalls.value = len(self._stall_timestamps)
 
-        self.stop_all_ffmpeg()
-        self.logpipe.close()
-        self.config_subscriber.stop()
-        self.segment_subscriber.stop()
-
     def start_ffmpeg_detect(self):
         detect_cmd = [c for c in self.config.ffmpeg_cmds if "detect" in c["roles"]][0]
         ffmpeg_cmd = detect_cmd["cmd"]
@@ -641,6 +663,8 @@ class CameraWatchdog(threading.Thread):
             self.stop_event,
         )
         self.capture_thread.start()
+        if self.capture_thread_id is not None:
+            self.capture_thread_id.value = self.capture_thread.native_id
 
     def start_all_ffmpeg(self):
         """Start all ffmpeg processes (detection and others)."""
@@ -705,7 +729,7 @@ class CameraCaptureRunner(threading.Thread):
         self.skipped_fps = skipped_fps
         self.frame_manager = SharedMemoryFrameManager()
         self.ffmpeg_process = ffmpeg_process
-        self.current_frame = Value("d", 0.0)
+        self.current_frame = FrameTime()
         self.last_frame = 0
 
     def run(self):
