@@ -6,7 +6,7 @@
  * trigger Chromium reproduces without real media. A healthy stream
  * answers negotiation and then sends nothing, so it waits quietly.
  */
-import type { Locator, Page } from "@playwright/test";
+import type { Locator, Page, WebSocketRoute } from "@playwright/test";
 import { test, expect } from "../fixtures/frigate-test";
 import { LivePage } from "../pages/live.page";
 
@@ -386,13 +386,19 @@ test.describe("Live stream errors", () => {
         },
       },
     });
-    // the check stays pending until its timeout, after auto reached the floor
-    await frigateApp.page.routeWebSocket("**/live/webrtc/api/ws**", () => {});
-    const verdict = frigateApp.page.waitForEvent("console", {
-      predicate: (message) => message.text().includes("WebRTC unavailable"),
-      timeout: 20_000,
+    // hold the WebRTC check open until auto has reached the floor. The check
+    // starts over on each stream auto plays, so keep its socket per stream.
+    const probes = new Map<string, WebSocketRoute>();
+    await frigateApp.page.routeWebSocket("**/live/webrtc/api/ws**", (ws) => {
+      probes.set(new URL(ws.url()).searchParams.get("src") ?? "", ws);
     });
-    const opened = await mockGo2rtc(
+    let verdictSeen = false;
+    frigateApp.page.on("console", (message) => {
+      if (message.text().includes("WebRTC unavailable")) {
+        verdictSeen = true;
+      }
+    });
+    await mockGo2rtc(
       frigateApp.page,
       ["front_door", "front_door_sub"],
       sourceError,
@@ -400,12 +406,19 @@ test.describe("Live stream errors", () => {
 
     await frigateApp.goto("/#front_door");
 
-    await expect
-      .poll(() => opened, { timeout: 10_000 })
-      .toContain("front_door_sub");
-    await verdict;
     const menu = await openDesktopSettings(frigateApp.page);
-    await expect(streamTrigger(menu)).toHaveText("Auto · Low bandwidth");
+    await expect(streamTrigger(menu)).toHaveText("Auto · Low bandwidth", {
+      timeout: 10_000,
+    });
+    expect(verdictSeen).toBe(false);
+    await expect.poll(() => probes.has("front_door_sub")).toBe(true);
+
+    // an answer the browser rejects ends the check right away
+    probes
+      .get("front_door_sub")!
+      .send(JSON.stringify({ type: "webrtc/answer", value: "not an sdp" }));
+    // well before the check's own 5 second timeout
+    await expect.poll(() => verdictSeen, { timeout: 3_000 }).toBe(true);
     await expect(menu.locator("pre")).toHaveText(sourceError);
   });
 
