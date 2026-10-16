@@ -481,11 +481,13 @@ test.describe("Unsupported video codec", () => {
         "Live view is in low-bandwidth mode because this browser can't play this camera's H.265 video.",
       ),
     ).toBeVisible({ timeout: 10_000 });
-    await expect(menu.getByText(/video codec to H\.264/)).toBeVisible();
-    await expect(
-      menu.getByText(/transcode to H\.264 with go2rtc/),
-    ).toBeVisible();
-    await expect(menu.getByText(/such as Safari/)).toBeVisible();
+    for (const fix of [
+      "Set the camera's video codec to H.264 in its own settings (recommended).",
+      "In the Frigate config, use an H.264 stream for live view, such as the camera's substream, or transcode to H.264 with go2rtc.",
+      "Use a browser that can play H.265 video, such as Safari.",
+    ]) {
+      await expect(menu.getByText(fix, { exact: true })).toBeVisible();
+    }
     await expect(
       menu.getByRole("link", { name: "Read the documentation" }).last(),
     ).toHaveAttribute("href", /troubleshooting\/go2rtc/);
@@ -529,7 +531,10 @@ test.describe("Unsupported video codec", () => {
 
     const menu = await openDesktopSettings(frigateApp.page);
     await expect(
-      menu.getByText(/can't play this camera's video codec/),
+      menu.getByText(
+        "Live view is in low-bandwidth mode because this browser can't play this camera's video codec.",
+        { exact: true },
+      ),
     ).toBeVisible({ timeout: 10_000 });
     await expect(
       menu.getByText("Use a browser that can play this camera's video."),
