@@ -650,9 +650,14 @@ export default function LiveCameraView({
       if (e) {
         // before auto's answer: when auto steps down from its last stream to
         // the low-bandwidth floor, the notice shows this. A step to another
-        // stream changes the stream name, which clears it.
+        // stream changes the stream name, which clears it. A later error
+        // replaces it, also one without a message, or the notice would explain
+        // that error with an older one. The exception is WebRTC failing after
+        // it took over from MSE, whose error is still why live view fell back.
         if (detail) {
           setStreamErrorDetail(detail);
+        } else if (!webRTC) {
+          setStreamErrorDetail(undefined);
         }
 
         if (e === "mse-codec") {
@@ -674,7 +679,7 @@ export default function LiveCameraView({
         }
       }
     },
-    [autoHandleError, preferredLiveMode, webRTCUsable],
+    [autoHandleError, preferredLiveMode, webRTC, webRTCUsable],
   );
 
   const resetStream = useCallback(() => {
