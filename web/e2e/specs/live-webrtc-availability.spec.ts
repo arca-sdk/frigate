@@ -110,6 +110,17 @@ test.describe("WebRTC availability gating @critical", () => {
     // distinguishes enabled from disabled options.
     const mseOption = frigateApp.page.getByRole("option", { name: /MSE/ });
     await expect(mseOption).not.toHaveAttribute("aria-disabled", "true");
+
+    // a missing setting, so the note names it and says it's optional rather
+    // than reading as a failure. The app is opened at localhost, which isn't
+    // an address to suggest.
+    await expect(webrtcOption).toContainText(
+      "this server's IP address and port 8555 under go2rtc → webrtc → candidates",
+    );
+    await expect(webrtcOption).toContainText(
+      "Optional: live view works without it.",
+    );
+    await expect(webrtcOption.locator(".text-danger")).toHaveCount(0);
   });
 
   test("the unavailable reason is logged to the console once", async ({
