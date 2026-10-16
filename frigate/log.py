@@ -116,6 +116,10 @@ def reopen_std_streams() -> None:
 os.register_at_fork(after_in_child=reopen_std_streams)
 
 
+# written into the pipe by clear(); ffmpeg never prints a NUL character
+_CLEAR_MARKER = "\x00frigate:clear\n"
+
+
 # based on https://codereview.stackexchange.com/a/17959
 class LogPipe(threading.Thread):
     def __init__(self, log_name: str, level: int = logging.ERROR):
@@ -140,9 +144,32 @@ class LogPipe(threading.Thread):
     def run(self) -> None:
         """Run the thread, logging everything."""
         for line in iter(self.pipeReader.readline, ""):
+            if line == _CLEAR_MARKER:
+                self.deque.clear()
+                continue
+
             self.deque.append(self.cleanup_log(line))
 
         self.pipeReader.close()
+
+    def tail(self, count: int) -> list[str]:
+        """Return the last non-empty lines without consuming them."""
+        # copy() is atomic, iterating the deque while the reader thread appends
+        # to it is not
+        lines = [line for line in self.deque.copy() if line.strip()]
+        return lines[-count:]
+
+    def clear(self) -> None:
+        """Drop the buffered lines without logging them.
+
+        Lines a process wrote just before it exited can still be in the pipe,
+        so the reader clears the buffer when it reaches a marker written after
+        them rather than this clearing it right away. Call it once the process
+        writing to the pipe has exited.
+        """
+        # the newline ends an unterminated last line, which readline() would
+        # otherwise join to the marker
+        os.write(self.fdWrite, f"\n{_CLEAR_MARKER}".encode())
 
     def dump(self) -> None:
         if not self.deque:

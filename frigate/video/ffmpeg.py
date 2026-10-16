@@ -33,7 +33,11 @@ from frigate.const import (
     STREAM_TYPE_TO_ROLE,
 )
 from frigate.log import LogPipe
-from frigate.util.builtin import EventsPerSecond, get_record_segment_time
+from frigate.util.builtin import (
+    EventsPerSecond,
+    get_record_segment_time,
+    redact_url_secrets,
+)
 from frigate.util.ffmpeg import start_or_restart_ffmpeg, stop_ffmpeg
 from frigate.util.image import (
     FrameManager,
@@ -44,6 +48,9 @@ from frigate.util.process import FrigateProcess
 logger = logging.getLogger(__name__)
 
 RECORD_GRACE_SECONDS = 90
+
+# how many of the last ffmpeg lines are published when the detect process exits
+FFMPEG_ERROR_LINES = 5
 
 
 @dataclass
@@ -155,6 +162,7 @@ class CameraWatchdog(threading.Thread):
         detection_frame,
         stop_event,
         capture_thread_id=None,
+        ffmpeg_error=None,
     ):
         threading.Thread.__init__(self)
         self.name = f"watchdog:{config.name}"
@@ -162,6 +170,12 @@ class CameraWatchdog(threading.Thread):
         # when the camera runs as threads of a shared process, its capture CPU
         # is reported per thread, so publish the capture thread's id
         self.capture_thread_id = capture_thread_id
+        # the stats show it while the camera is offline, so the UI can tell why
+        self.ffmpeg_error = ffmpeg_error
+        # what was last written to the shared value, so the 1 second loop does
+        # not go to the manager process every tick. None until the first write,
+        # the value may be left over from a camera host that crashed.
+        self._published_ffmpeg_error: str | None = None
         self.config = config
         self.shm_frame_count = shm_frame_count
         self.capture_thread = None
@@ -309,6 +323,28 @@ class CameraWatchdog(threading.Thread):
             if role in roles and self.config.record.stream_enabled(stream_type)
         ]
 
+    def _publish_ffmpeg_error(self, error: str) -> None:
+        if self.ffmpeg_error is None or error == self._published_ffmpeg_error:
+            return
+
+        self.ffmpeg_error.value = error
+        self._published_ffmpeg_error = error
+
+    def _report_ffmpeg_error(self) -> None:
+        """Publish the last lines the detect ffmpeg process printed."""
+        # ffmpeg prints the cause before the summary, so a single line is often
+        # just "Error opening output files: Invalid argument". The stats reach
+        # camera viewers, not only admins, so URL secrets are removed.
+        lines = [
+            redact_url_secrets(line) for line in self.logpipe.tail(FFMPEG_ERROR_LINES)
+        ]
+
+        if lines:
+            self._publish_ffmpeg_error("\n".join(lines))
+
+    def _clear_ffmpeg_error(self) -> None:
+        self._publish_ffmpeg_error("")
+
     def _check_config_updates(self) -> dict[str, list[str]]:
         """Check for config updates and return the update dict."""
         return self.config_subscriber.check_for_updates()
@@ -357,6 +393,8 @@ class CameraWatchdog(threading.Thread):
                     f"Capture thread for {self.config.name} did not exit in time"
                 )
 
+        # dump() empties the pipe
+        self._report_ffmpeg_error()
         self.logpipe.dump()
         self.logger.info("Restarting ffmpeg...")
         self.start_ffmpeg_detect()
@@ -502,6 +540,8 @@ class CameraWatchdog(threading.Thread):
                 self.logger.error(
                     f"Ffmpeg process crashed unexpectedly for {self.config.name}."
                 )
+                # publish now rather than after the restart backoff
+                self._report_ffmpeg_error()
                 if can_restart:
                     self.reset_capture_thread(terminate=False)
                     last_restart_time = now
@@ -531,6 +571,11 @@ class CameraWatchdog(threading.Thread):
                 # process is running normally
                 self.detect_status.send("online", now)
                 self.fps_overflow_count = 0
+
+                # this branch is also reached during the 20 seconds after a
+                # restart, before ffmpeg has produced a frame or exited
+                if self.camera_fps.value > 0:
+                    self._clear_ffmpeg_error()
 
             for p in self.ffmpeg_other_processes:
                 poll = p["process"].poll()
@@ -697,11 +742,16 @@ class CameraWatchdog(threading.Thread):
         if self.ffmpeg_detect_process is not None:
             stop_ffmpeg(self.ffmpeg_detect_process, self.logger)
             self.ffmpeg_detect_process = None
+            # the next detect process reuses the pipe, and an intentional stop
+            # isn't an error to report as part of its output
+            self.logpipe.clear()
         for p in self.ffmpeg_other_processes[:]:
             if p["process"] is not None:
                 stop_ffmpeg(p["process"], self.logger)
             p["logpipe"].close()
         self.ffmpeg_other_processes.clear()
+        # the camera was disabled or its ffmpeg config changed
+        self._clear_ffmpeg_error()
 
 
 class CameraCaptureRunner(threading.Thread):
@@ -781,6 +831,7 @@ class CameraCapture(FrigateProcess):
             self.camera_metrics.reconnects_last_hour,
             self.camera_metrics.detection_frame,
             self.stop_event,
+            ffmpeg_error=self.camera_metrics.ffmpeg_error,
         )
         camera_watchdog.start()
         camera_watchdog.join()

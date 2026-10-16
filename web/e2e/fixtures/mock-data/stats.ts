@@ -21,6 +21,7 @@ function cameraStats(_name: string) {
     expected_fps: 5,
     reconnects_last_hour: 0,
     stalls_last_hour: 0,
+    ffmpeg_error: null as string | null,
   };
 }
 

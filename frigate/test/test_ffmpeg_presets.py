@@ -1,8 +1,14 @@
 import unittest
+from unittest.mock import patch
 
 from frigate.config import FrigateConfig
 from frigate.config.camera.ffmpeg import FFMPEG_INPUT_ARGS_DEFAULT
-from frigate.ffmpeg_presets import parse_preset_input
+from frigate.ffmpeg_presets import (
+    _gpu_selector,
+    parse_preset_hardware_acceleration_decode,
+    parse_preset_hardware_acceleration_encode,
+    parse_preset_input,
+)
 
 
 class TestFfmpegPresets(unittest.TestCase):
@@ -150,6 +156,115 @@ class TestFfmpegPresets(unittest.TestCase):
         assert "-some output" in (
             " ".join(frigate_config.cameras["back"].ffmpeg_cmds[0]["cmd"])
         )
+
+
+class TestGpuDevicePresets(unittest.TestCase):
+    def use_gpus(self, gpus: list[str]) -> None:
+        # the selector caches what it found in /dev/dri and logs a missing GPU
+        # once per process
+        for attribute, value in (
+            ("_valid_gpus", gpus),
+            ("_missing_gpu_logged", False),
+        ):
+            patcher = patch.object(_gpu_selector, attribute, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def detect_cmd(self, hwaccel_args: str) -> str:
+        config = FrigateConfig(
+            **{
+                "mqtt": {"host": "mqtt"},
+                "cameras": {
+                    "back": {
+                        "ffmpeg": {
+                            "hwaccel_args": hwaccel_args,
+                            "inputs": [
+                                {
+                                    "path": "rtsp://10.0.0.1:554/video",
+                                    "roles": ["detect"],
+                                }
+                            ],
+                        },
+                        "detect": {"height": 720, "width": 1280, "fps": 5},
+                    }
+                },
+            }
+        )
+        return " ".join(config.cameras["back"].ffmpeg_cmds[0]["cmd"])
+
+    def test_vaapi_without_gpu_drops_the_device_option(self):
+        self.use_gpus([])
+
+        with self.assertLogs("frigate.ffmpeg_presets", "ERROR") as logs:
+            cmd = self.detect_cmd("preset-vaapi")
+
+        # an empty device made ffmpeg read -hwaccel_output_format as the device
+        # and vaapi as an output file
+        assert "-hwaccel_device" not in cmd
+        assert "-hwaccel vaapi -hwaccel_output_format vaapi" in cmd
+        assert "No usable GPU was found in /dev/dri" in logs.output[0]
+
+    def test_vaapi_with_gpu_keeps_the_device(self):
+        self.use_gpus(["/dev/dri/renderD129"])
+
+        with self.assertNoLogs("frigate.ffmpeg_presets", "ERROR"):
+            cmd = self.detect_cmd("preset-vaapi")
+
+        assert "-hwaccel_device /dev/dri/renderD129 -hwaccel_output_format vaapi" in cmd
+
+    def test_qsv_without_gpu_drops_the_device_option(self):
+        self.use_gpus([])
+
+        with self.assertLogs("frigate.ffmpeg_presets", "ERROR"):
+            args = parse_preset_hardware_acceleration_decode(
+                "preset-intel-qsv-h264", 5, 1280, 720, 0
+            )
+
+        assert "-qsv_device" not in args
+        assert "" not in args
+        assert " ".join(args).startswith("-hwaccel qsv -hwaccel_output_format qsv")
+
+    def test_missing_gpu_is_logged_once(self):
+        self.use_gpus([])
+
+        with self.assertLogs("frigate.ffmpeg_presets", "ERROR") as logs:
+            for _ in range(3):
+                parse_preset_hardware_acceleration_decode(
+                    "preset-vaapi", 5, 1280, 720, 0
+                )
+
+        assert len(logs.records) == 1
+
+    def test_encode_without_gpu_drops_the_device_options(self):
+        self.use_gpus([])
+
+        with self.assertLogs("frigate.ffmpeg_presets", "ERROR"):
+            cmd = parse_preset_hardware_acceleration_encode(
+                "ffmpeg", "preset-vaapi", "-i input", "output"
+            )
+
+        assert "-vaapi_device" not in cmd
+        assert "-hwaccel_device" not in cmd
+        assert cmd.startswith(
+            "ffmpeg -hide_banner -hwaccel vaapi -hwaccel_output_format vaapi "
+            "-i input -c:v h264_vaapi"
+        )
+
+    def test_presets_without_a_device_do_not_look_for_a_gpu(self):
+        self.use_gpus([])
+
+        with (
+            patch.object(_gpu_selector, "get_gpu_arg") as get_gpu_arg,
+            self.assertNoLogs("frigate.ffmpeg_presets", "ERROR"),
+        ):
+            parse_preset_hardware_acceleration_encode(
+                "ffmpeg", "default", "-i input", "output"
+            )
+            parse_preset_hardware_acceleration_decode(
+                "preset-rpi-64-h264", 5, 1280, 720, 0
+            )
+
+        get_gpu_arg.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -22,6 +22,7 @@ from ruamel.yaml import YAML
 
 from frigate.const import (
     REGEX_HTTP_CAMERA_USER_PASS,
+    REGEX_MASK_CAMERA_USER_PASS,
     REGEX_RTSP_CAMERA_USER_PASS,
     STREAM_TYPE_MAIN,
     STREAM_TYPE_SUB,
@@ -118,8 +119,26 @@ def deep_merge(dct1: dict, dct2: dict, override=False, merge_lists=False) -> dic
 
 def clean_camera_user_pass(line: str) -> str:
     """Removes user and password from line."""
-    rtsp_cleaned = re.sub(REGEX_RTSP_CAMERA_USER_PASS, "://*:*@", line)
+    rtsp_cleaned = re.sub(REGEX_MASK_CAMERA_USER_PASS, "://*:*@", line)
     return re.sub(REGEX_HTTP_CAMERA_USER_PASS, "user=*&password=*", rtsp_cleaned)
+
+
+# ffmpeg prints "url: message", so a colon ending the URL is not part of it
+_URL = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://\S+?(?=:?(?:\s|$))")
+_QUERY_VALUE = re.compile(r"([?&][^=&\s#]+)=[^&\s#]*")
+
+
+def redact_url_secrets(line: str) -> str:
+    """Remove credentials and every query parameter value from URLs in line.
+
+    For text shown to users who can't read the logs: a camera URL can carry a
+    secret in any query parameter, such as ?token=, so no list of names is
+    safe. Parameter names are kept since they help read the error.
+    """
+    return _URL.sub(
+        lambda url: _QUERY_VALUE.sub(r"\1=*", url.group(0)),
+        clean_camera_user_pass(line),
+    )
 
 
 def escape_special_characters(path: str) -> str:

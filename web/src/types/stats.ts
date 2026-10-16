@@ -29,6 +29,8 @@ export type CameraStats = {
   expected_fps: number;
   reconnects_last_hour: number;
   stalls_last_hour: number;
+  // last lines ffmpeg printed before the detect stream stopped
+  ffmpeg_error?: string | null;
   ffmpeg_cpu?: string;
   capture_cpu?: string;
   detect_cpu?: string;

@@ -22,6 +22,9 @@ class CameraMetrics:
     ffmpeg_pid: ValueProxy[int]
     reconnects_last_hour: ValueProxy[int]
     stalls_last_hour: ValueProxy[int]
+    # last lines ffmpeg printed before the detect process exited, empty while
+    # frames are received
+    ffmpeg_error: ValueProxy[str]
 
     def __init__(self, manager: SyncManager):
         self.camera_fps = manager.Value("d", 0)
@@ -40,6 +43,8 @@ class CameraMetrics:
         self.ffmpeg_pid = manager.Value("i", 0)
         self.reconnects_last_hour = manager.Value("i", 0)
         self.stalls_last_hour = manager.Value("i", 0)
+        # the manager keeps any Python object, the typecode is not used
+        self.ffmpeg_error = manager.Value("u", "")
 
 
 class PTZMetrics:

@@ -106,6 +106,8 @@ import { useTranslation } from "react-i18next";
 import { useDocDomain } from "@/hooks/use-doc-domain";
 import { detectCameraAudioFeatures } from "@/utils/cameraUtil";
 import { isRestreamedStream } from "@/utils/liveTranscode";
+import { codecDisplayName, unmatchedVideoCodecs } from "@/utils/codecSupport";
+import CodecUnsupportedHint from "@/components/player/CodecUnsupportedHint";
 import PtzControlPanel from "@/components/overlay/PtzControlPanel";
 import ObjectSettingsView from "../settings/ObjectSettingsView";
 import { useSearchEffect } from "@/hooks/use-overlay-state";
@@ -173,6 +175,13 @@ export default function LiveCameraView({
   // error fallback latches, layered on top in preferredLiveMode
   const [webRTC, setWebRTC] = useState(false);
   const [lowBandwidth, setLowBandwidth] = useState(false);
+  // the server's message for the error that caused the fallback, kept through
+  // a WebRTC attempt that fails without one
+  const [streamErrorDetail, setStreamErrorDetail] = useState<string>();
+  // set when go2rtc had no video codec this browser plays, empty when go2rtc
+  // didn't say which codecs the stream has. Explains auto's step down; the
+  // low-bandwidth notice reads the error behind the fallback instead.
+  const [unsupportedCodecs, setUnsupportedCodecs] = useState<string[]>();
 
   const liveStreams = useMemo(
     () => Object.values(camera.live.streams || {}),
@@ -501,15 +510,33 @@ export default function LiveCameraView({
   useEffect(() => {
     setWebRTC(false);
     setLowBandwidth(false);
+    setStreamErrorDetail(undefined);
   }, [userPreferredLiveMode, streamName, forceLowBandwidth]);
+
+  // read by the effect below without making it rerun when the floor changes
+  const atFloorRef = useRef(autoStream.atFloor);
+  useEffect(() => {
+    atFloorRef.current = autoStream.atFloor;
+  }, [autoStream.atFloor]);
 
   // A fallback chosen before the verdict arrived was made on incomplete info.
   useEffect(() => {
     if (!webRTCVerdictPending) {
       setWebRTC(false);
       setLowBandwidth(false);
+      // auto's floor isn't reset here and keeps showing the low-bandwidth
+      // notice, which still needs the error behind it
+      if (!atFloorRef.current) {
+        setStreamErrorDetail(undefined);
+      }
     }
   }, [webRTCVerdictPending]);
+
+  // Unlike the latches above this survives auto stepping down to another
+  // stream, which is when it explains why auto did.
+  useEffect(() => {
+    setUnsupportedCodecs(undefined);
+  }, [userPreferredLiveMode, pinnedStream, forceLowBandwidth]);
 
   useKeyboardListener(["m", "Escape"], (key, modifiers) => {
     if (!modifiers.down) {
@@ -619,8 +646,24 @@ export default function LiveCameraView({
   }, [fullscreen, cameraAspectRatio]);
 
   const handleError = useCallback(
-    (e: LivePlayerError) => {
+    (e: LivePlayerError, detail?: string) => {
       if (e) {
+        // before auto's answer: when auto steps down from its last stream to
+        // the low-bandwidth floor, the notice shows this. A step to another
+        // stream changes the stream name, which clears it. A later error
+        // replaces it, also one without a message, or the notice would explain
+        // that error with an older one. The exception is WebRTC failing after
+        // it took over from MSE, whose error is still why live view fell back.
+        if (detail) {
+          setStreamErrorDetail(detail);
+        } else if (!webRTC) {
+          setStreamErrorDetail(undefined);
+        }
+
+        if (e === "mse-codec") {
+          setUnsupportedCodecs(unmatchedVideoCodecs(detail ?? "") ?? []);
+        }
+
         // auto answers congestion and codec failures with a lower stream
         if (autoHandleError(e)) {
           return;
@@ -636,11 +679,13 @@ export default function LiveCameraView({
         }
       }
     },
-    [autoHandleError, preferredLiveMode, webRTCUsable],
+    [autoHandleError, preferredLiveMode, webRTC, webRTCUsable],
   );
 
   const resetStream = useCallback(() => {
     setLowBandwidth(false);
+    setStreamErrorDetail(undefined);
+    setUnsupportedCodecs(undefined);
     resetAutoStream();
   }, [resetAutoStream]);
 
@@ -842,6 +887,8 @@ export default function LiveCameraView({
               isRestreamed={isRestreamed ?? false}
               isWebRTCAvailable={isWebRTCAvailable}
               webRTCUnavailableReason={webRTCAvailability.reason}
+              streamErrorDetail={streamErrorDetail}
+              unsupportedCodecs={unsupportedCodecs}
               onResetStream={resetStream}
               supportsAudioOutput={supportsAudioOutput}
               supports2WayTalk={supports2WayTalk}
@@ -1002,6 +1049,8 @@ type FrigateCameraFeaturesProps = {
   isRestreamed: boolean;
   isWebRTCAvailable: boolean;
   webRTCUnavailableReason?: WebRTCUnavailableReason;
+  streamErrorDetail?: string;
+  unsupportedCodecs?: string[];
   onResetStream: () => void;
   supportsAudioOutput: boolean;
   supports2WayTalk: boolean;
@@ -1033,6 +1082,8 @@ function FrigateCameraFeatures({
   isRestreamed,
   isWebRTCAvailable,
   webRTCUnavailableReason,
+  streamErrorDetail,
+  unsupportedCodecs,
   onResetStream,
   supportsAudioOutput,
   supports2WayTalk,
@@ -1042,6 +1093,19 @@ function FrigateCameraFeatures({
 }: FrigateCameraFeaturesProps) {
   const { t } = useTranslation(["views/live", "components/dialog"]);
   const { getLocaleDocUrl } = useDocDomain();
+
+  // from the error behind the fallback, which can differ from the codec auto
+  // stepped down for when a lower stream later fails for another reason
+  const fallbackCodecs = streamErrorDetail
+    ? unmatchedVideoCodecs(streamErrorDetail)
+    : undefined;
+  const lowBandwidthTips = fallbackCodecs
+    ? fallbackCodecs.length > 0
+      ? t("stream.codecUnsupported.lowBandwidth", {
+          codec: fallbackCodecs.map(codecDisplayName).join(", "),
+        })
+      : t("stream.codecUnsupported.lowBandwidthUnknown")
+    : t("stream.lowBandwidth.tips");
 
   const { payload: detectState, send: sendDetect } = useDetectState(
     camera.name,
@@ -1414,6 +1478,7 @@ function FrigateCameraFeatures({
                         playingStream={playingStream}
                         autoAvailable={autoAvailable}
                         autoReason={autoReason}
+                        unsupportedCodecs={unsupportedCodecs}
                         onSelect={onSelectStream}
                         onRetry={onResetStream}
                         disabled={debug || forceLowBandwidth}
@@ -1529,10 +1594,15 @@ function FrigateCameraFeatures({
                             <div className="flex flex-row items-center gap-2">
                               <IoIosWarning className="mr-1 size-8 text-danger" />
 
-                              <p className="text-sm">
-                                {t("stream.lowBandwidth.tips")}
-                              </p>
+                              <p className="text-sm">{lowBandwidthTips}</p>
                             </div>
+                            {fallbackCodecs ? (
+                              <CodecUnsupportedHint codecs={fallbackCodecs} />
+                            ) : (
+                              streamErrorDetail && (
+                                <StreamErrorDetail detail={streamErrorDetail} />
+                              )
+                            )}
                             <Button
                               className={`flex items-center gap-2.5 rounded-lg`}
                               aria-label={t("stream.lowBandwidth.resetStream")}
@@ -1806,6 +1876,7 @@ function FrigateCameraFeatures({
                       playingStream={playingStream}
                       autoAvailable={autoAvailable}
                       autoReason={autoReason}
+                      unsupportedCodecs={unsupportedCodecs}
                       onSelect={onSelectStream}
                       onRetry={onResetStream}
                       disabled={debug || forceLowBandwidth}
@@ -1916,10 +1987,15 @@ function FrigateCameraFeatures({
                         <div className="mt-2 flex flex-col items-center gap-3">
                           <div className="flex flex-row items-center gap-2">
                             <IoIosWarning className="mr-1 size-8 text-danger" />
-                            <p className="text-sm">
-                              {t("stream.lowBandwidth.tips")}
-                            </p>
+                            <p className="text-sm">{lowBandwidthTips}</p>
                           </div>
+                          {fallbackCodecs ? (
+                            <CodecUnsupportedHint codecs={fallbackCodecs} />
+                          ) : (
+                            streamErrorDetail && (
+                              <StreamErrorDetail detail={streamErrorDetail} />
+                            )
+                          )}
                           <Button
                             className={`flex items-center gap-2.5 rounded-lg`}
                             aria-label={t("stream.lowBandwidth.resetStream")}
@@ -2042,5 +2118,21 @@ function FrigateCameraFeatures({
         </div>
       </DrawerContent>
     </Drawer>
+  );
+}
+
+type StreamErrorDetailProps = {
+  detail: string;
+};
+
+// go2rtc's own message, so it is shown as is rather than translated
+function StreamErrorDetail({ detail }: StreamErrorDetailProps) {
+  return (
+    <pre
+      className="max-h-32 w-full overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-secondary p-2 text-left font-mono text-xs"
+      title={detail}
+    >
+      {detail}
+    </pre>
   );
 }

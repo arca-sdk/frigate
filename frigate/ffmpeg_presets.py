@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 from enum import Enum
 from typing import Any
 
@@ -24,6 +25,7 @@ class LibvaGpuSelector:
     "Automatically selects the correct libva GPU."
 
     _valid_gpus: list[str] | None = None
+    _missing_gpu_logged: bool = False
 
     def __get_valid_gpus(self) -> None:
         """Get valid libva GPUs."""
@@ -68,6 +70,43 @@ class LibvaGpuSelector:
         else:
             logger.warning(f"Invalid GPU index {gpu}, using first valid GPU")
             return self._valid_gpus[0]
+
+    def log_missing_gpu(self, preset: str) -> None:
+        """Log once per process that a preset needs a GPU that wasn't found."""
+        if self._missing_gpu_logged:
+            return
+
+        self._missing_gpu_logged = True
+        logger.error(
+            "No usable GPU was found in /dev/dri for hwaccel_args %s, make sure "
+            "the GPU is passed through to the container (for example with "
+            "--device /dev/dri/renderD128) or remove the preset to decode on "
+            "the CPU",
+            preset,
+        )
+
+
+# an ffmpeg option that takes the GPU device, such as "-hwaccel_device {3}"
+GPU_DEVICE_OPTION = re.compile(r"-\S+ \{3\} ?")
+
+
+def _fill_gpu_device(preset: str, template: str, gpu: int) -> tuple[str, str]:
+    """Return the preset template and the GPU device to fill in for {3}.
+
+    Without a GPU the device would be empty and ffmpeg would read the next option
+    as the device name, so the options taking it are dropped instead. ffmpeg then
+    fails with an error that says no device is available.
+    """
+    if "{3}" not in template:
+        return template, ""
+
+    gpu_arg = _gpu_selector.get_gpu_arg(preset, gpu)
+
+    if gpu_arg:
+        return template, gpu_arg
+
+    _gpu_selector.log_missing_gpu(preset)
+    return GPU_DEVICE_OPTION.sub("", template), ""
 
 
 FPS_VFR_PARAM = "-fps_mode vfr" if LIBAVFORMAT_VERSION_MAJOR >= 59 else "-vsync 2"
@@ -238,7 +277,7 @@ def parse_preset_hardware_acceleration_decode(
     if not decode:
         return None
 
-    gpu_arg = _gpu_selector.get_gpu_arg(arg, gpu)
+    decode, gpu_arg = _fill_gpu_device(arg, decode, gpu)
     return decode.format(fps, width, height, gpu_arg).split(" ")
 
 
@@ -288,12 +327,8 @@ def parse_preset_hardware_acceleration_encode(
     if arg.startswith("preset-jetson-") and not os.path.exists("/dev/nvhost-msenc"):
         arg = "default"
 
-    return arg_map.get(arg, arg_map["default"]).format(
-        ffmpeg_path,
-        input,
-        output,
-        _gpu_selector.get_gpu_arg(arg, 0),
-    )
+    encode, gpu_arg = _fill_gpu_device(arg, arg_map.get(arg, arg_map["default"]), 0)
+    return encode.format(ffmpeg_path, input, output, gpu_arg)
 
 
 PRESETS_INPUT = {

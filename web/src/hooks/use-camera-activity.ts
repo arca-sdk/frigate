@@ -29,6 +29,8 @@ type useCameraActivityReturn = {
   objects: ObjectType[];
   audio_detections: AudioDetection[];
   offline: boolean;
+  // why the detect stream is offline, as printed by ffmpeg
+  ffmpegError?: string;
 };
 
 export function isCameraOffline(
@@ -186,6 +188,14 @@ export function useCameraActivity(
     [camera, stats],
   );
 
+  const ffmpegError = useMemo(
+    () =>
+      offline && camera
+        ? (stats?.cameras[camera.name]?.ffmpeg_error ?? undefined)
+        : undefined,
+    [camera, offline, stats],
+  );
+
   const isCameraEnabled = cameraEnabled ? cameraEnabled === "ON" : true;
 
   return {
@@ -199,6 +209,7 @@ export function useCameraActivity(
     objects: isCameraEnabled ? (objects ?? []) : [],
     audio_detections: isCameraEnabled ? (audioDetections ?? []) : [],
     offline,
+    ffmpegError,
   };
 }
 

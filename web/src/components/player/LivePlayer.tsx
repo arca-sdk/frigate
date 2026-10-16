@@ -52,7 +52,7 @@ type LivePlayerProps = {
   showStats?: boolean;
   onClick?: () => void;
   setFullResolution?: React.Dispatch<React.SetStateAction<VideoResolutionType>>;
-  onError?: (error: LivePlayerError) => void;
+  onError?: (error: LivePlayerError, detail?: string) => void;
   onHealthSample?: (sample: LiveHealthSample) => void;
   streamAuto?: boolean;
   onMicrophoneError?: (error: TwoWayTalkError) => void;
@@ -130,6 +130,7 @@ export default function LivePlayer({
     activeTracking,
     objects,
     offline,
+    ffmpegError,
   } = useCameraActivity(cameraConfig);
 
   const cameraActive = useMemo(
@@ -505,18 +506,23 @@ export default function LivePlayer({
             <div className="flex flex-col items-center justify-center gap-2 rounded-lg bg-background/50 p-3 text-center">
               <div>{t("streamOffline.title")}</div>
               <TbExclamationCircle className="size-6" />
-              {!isCompact && (
-                <p className="text-center text-sm">
-                  <Trans
-                    ns="components/player"
-                    values={{
-                      cameraName: cameraName,
-                    }}
-                  >
-                    streamOffline.desc
-                  </Trans>
-                </p>
-              )}
+              {/* a tile has no room for both, and the error says more than
+                  the advice to check the logs */}
+              {!isCompact &&
+                (ffmpegError ? (
+                  <FfmpegError error={ffmpegError} className="line-clamp-3" />
+                ) : (
+                  <p className="text-center text-sm">
+                    <Trans
+                      ns="components/player"
+                      values={{
+                        cameraName: cameraName,
+                      }}
+                    >
+                      streamOffline.desc
+                    </Trans>
+                  </p>
+                ))}
             </div>
           </div>
         </>
@@ -538,6 +544,14 @@ export default function LivePlayer({
                   streamOffline.desc
                 </Trans>
               </p>
+            )}
+            {!isCompact && ffmpegError && (
+              <div className="mt-4 w-full">
+                <FfmpegError
+                  error={ffmpegError}
+                  className="max-h-32 overflow-y-auto"
+                />
+              </div>
             )}
           </div>
         </div>
@@ -579,6 +593,34 @@ export default function LivePlayer({
           streamAuto={streamAuto}
         />
       )}
+    </div>
+  );
+}
+
+type FfmpegErrorProps = {
+  error: string;
+  // limits the lines shown, the full error is in the tooltip
+  className?: string;
+};
+
+// ffmpeg's own output, so it is shown as is rather than translated
+function FfmpegError({ error, className }: FfmpegErrorProps) {
+  const { t } = useTranslation(["components/player"]);
+
+  return (
+    <div className="flex w-full flex-col gap-1 text-left">
+      <div className="text-xs">{t("streamOffline.ffmpegError")}</div>
+      {/* padding outside the clamped element, or the next line shows in it */}
+      <div className="rounded-md bg-background/60 p-2" title={error}>
+        <pre
+          className={cn(
+            "whitespace-pre-wrap break-words font-mono text-xs",
+            className,
+          )}
+        >
+          {error}
+        </pre>
+      </div>
     </div>
   );
 }

@@ -40,6 +40,7 @@ def hosted_camera(name: str) -> HostedCamera:
         detection_frame=None,
         capture_process_pid=SimpleNamespace(value=0),
         process_pid=SimpleNamespace(value=0),
+        ffmpeg_error=SimpleNamespace(value=""),
     )
     return HostedCamera(
         config=SimpleNamespace(name=name),

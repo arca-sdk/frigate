@@ -28,7 +28,8 @@ type MSEPlayerProps = {
   setStats?: (stats: PlayerStatsType) => void;
   onPlaying?: () => void;
   setFullResolution?: React.Dispatch<SetStateAction<VideoResolutionType>>;
-  onError?: (error: LivePlayerError) => void;
+  // detail is the server's own error message, when it sent one
+  onError?: (error: LivePlayerError, detail?: string) => void;
   onHealthSample?: (sample: LiveHealthSample) => void;
 };
 
@@ -107,7 +108,11 @@ function MSEPlayer({
   }, [onError]);
 
   const handleError = useCallback(
-    (error: LivePlayerError, description: string = "Unknown error") => {
+    (
+      error: LivePlayerError,
+      description: string = "Unknown error",
+      detail?: string,
+    ) => {
       // eslint-disable-next-line no-console
       console.error(
         `${camera} - MSE error '${error}': ${description} See the documentation: https://docs.frigate.video/configuration/live/#live-player-error-messages`,
@@ -121,7 +126,7 @@ function MSEPlayer({
         // eslint-disable-next-line no-console
         console.error(`${camera} - Supported codecs: ${CODECS.join(", ")}`);
       }
-      onErrorRef.current?.(error);
+      onErrorRef.current?.(error, detail);
     },
     // we know that these deps are correct
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -521,17 +526,25 @@ function MSEPlayer({
       };
     };
 
-    // go2rtc answers a codec it cannot provide with an error message
-    // instead of a negotiation reply
+    // go2rtc answers a request it cannot serve, such as a codec it cannot
+    // provide or a source that fails to start, with an error message instead
+    // of a negotiation reply. Without handling it here the player would wait
+    // for the startup timeout and report a generic error instead.
     onmessageRef.current["error"] = (msg) => {
-      if (msg.type !== "error" || !msg.value?.includes("codecs not matched")) {
+      if (msg.type !== "error") {
         return;
       }
+
+      const detail = typeof msg.value === "string" ? msg.value.trim() : "";
 
       if (wsRef.current) {
         onDisconnect();
       }
-      handleError("mse-codec", msg.value);
+      handleError(
+        detail.includes("codecs not matched") ? "mse-codec" : "startup",
+        detail || "go2rtc returned an error.",
+        detail || undefined,
+      );
     };
   };
 
