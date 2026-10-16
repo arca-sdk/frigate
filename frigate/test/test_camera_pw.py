@@ -69,6 +69,15 @@ class TestUserPassMaskingUserNames(unittest.TestCase):
         )
         assert masked == "[tcp @ 0x55] rtsp://*:*@192.0.2.1/live"
 
+    def test_urls_separated_by_a_comma_stay_separate(self):
+        # the ffprobe API splits on a comma left in the masked paths
+        assert (
+            clean_camera_user_pass(
+                "rtsp://cam.one:p@ss,1@192.0.2.1/live,rtsp://cam.two:pw@192.0.2.2/live"
+            )
+            == "rtsp://*:*@192.0.2.1/live,rtsp://*:*@192.0.2.2/live"
+        )
+
     def test_http_query_with_a_dotted_user(self):
         masked = clean_camera_user_pass(
             "http://192.0.2.1/cgi-bin/snap.cgi?user=cam.user&password=secret"
