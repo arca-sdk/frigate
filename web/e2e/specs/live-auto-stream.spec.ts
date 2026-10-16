@@ -68,7 +68,11 @@ async function readIdb(page: Page, key: string) {
 }
 
 // records the src of every MSE socket in open order
-async function mockGo2rtc(page: Page, failing: string[] = []) {
+async function mockGo2rtc(
+  page: Page,
+  failing: string[] = [],
+  error: string = CODEC_ERROR,
+) {
   const opened: string[] = [];
 
   await page.routeWebSocket("**/live/mse/api/ws**", (ws) => {
@@ -84,7 +88,7 @@ async function mockGo2rtc(page: Page, failing: string[] = []) {
       ws.send(
         JSON.stringify(
           failing.includes(src)
-            ? { type: "error", value: CODEC_ERROR }
+            ? { type: "error", value: error }
             : { type: "mse", value: 'video/mp4; codecs="avc1.640029"' },
         ),
       );
@@ -316,5 +320,56 @@ test.describe("Auto live stream selector", () => {
     await expect
       .poll(() => opened.slice(beforeReset), { timeout: 10_000 })
       .toEqual(["front_door", "front_door_sub"]);
+  });
+});
+
+test.describe("Live stream errors", () => {
+  test.use({ expectedErrors: [/MSE error 'startup'/] });
+
+  test.beforeEach(({ frigateApp }) => {
+    test.skip(frigateApp.isMobile, "Desktop dropdown only");
+  });
+
+  test("the low-bandwidth notice shows go2rtc's error", async ({
+    frigateApp,
+  }) => {
+    const sourceError =
+      "mse: streams: exec/rtsp\n[hwupload @ 0x5562] A hardware device reference is required to upload frames to.";
+    await frigateApp.installDefaults({ config: CONFIG });
+    await mockGo2rtc(frigateApp.page, ["backyard"], sourceError);
+
+    await frigateApp.goto("/#backyard");
+
+    const menu = await openDesktopSettings(frigateApp.page);
+    await expect(
+      menu.getByText(/Live view is in low-bandwidth mode/),
+    ).toBeVisible({ timeout: 10_000 });
+    await expect(menu.locator("pre")).toHaveText(sourceError);
+  });
+
+  test("Reset stream clears go2rtc's error", async ({ frigateApp }) => {
+    await frigateApp.installDefaults({ config: CONFIG });
+    const failing = ["backyard"];
+    await mockGo2rtc(
+      frigateApp.page,
+      failing,
+      "mse: streams: dial tcp 10.0.0.1:554: connect: connection refused",
+    );
+
+    await frigateApp.goto("/#backyard");
+
+    const menu = await openDesktopSettings(frigateApp.page);
+    await expect(menu.locator("pre")).toHaveText(/connection refused/, {
+      timeout: 10_000,
+    });
+
+    // the camera is reachable again
+    failing.length = 0;
+    await menu.getByRole("button", { name: "Reset stream" }).click();
+
+    await expect(
+      menu.getByText(/Live view is in low-bandwidth mode/),
+    ).toBeHidden({ timeout: 10_000 });
+    await expect(menu.locator("pre")).toHaveCount(0);
   });
 });

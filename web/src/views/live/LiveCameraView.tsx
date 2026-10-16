@@ -173,6 +173,9 @@ export default function LiveCameraView({
   // error fallback latches, layered on top in preferredLiveMode
   const [webRTC, setWebRTC] = useState(false);
   const [lowBandwidth, setLowBandwidth] = useState(false);
+  // the server's message for the error that caused the fallback, kept through
+  // a WebRTC attempt that fails without one
+  const [streamErrorDetail, setStreamErrorDetail] = useState<string>();
 
   const liveStreams = useMemo(
     () => Object.values(camera.live.streams || {}),
@@ -501,6 +504,7 @@ export default function LiveCameraView({
   useEffect(() => {
     setWebRTC(false);
     setLowBandwidth(false);
+    setStreamErrorDetail(undefined);
   }, [userPreferredLiveMode, streamName, forceLowBandwidth]);
 
   // A fallback chosen before the verdict arrived was made on incomplete info.
@@ -508,6 +512,7 @@ export default function LiveCameraView({
     if (!webRTCVerdictPending) {
       setWebRTC(false);
       setLowBandwidth(false);
+      setStreamErrorDetail(undefined);
     }
   }, [webRTCVerdictPending]);
 
@@ -619,11 +624,15 @@ export default function LiveCameraView({
   }, [fullscreen, cameraAspectRatio]);
 
   const handleError = useCallback(
-    (e: LivePlayerError) => {
+    (e: LivePlayerError, detail?: string) => {
       if (e) {
         // auto answers congestion and codec failures with a lower stream
         if (autoHandleError(e)) {
           return;
+        }
+
+        if (detail) {
+          setStreamErrorDetail(detail);
         }
 
         // WebRTC can now be the user's own choice, so the fallback flag no
@@ -641,6 +650,7 @@ export default function LiveCameraView({
 
   const resetStream = useCallback(() => {
     setLowBandwidth(false);
+    setStreamErrorDetail(undefined);
     resetAutoStream();
   }, [resetAutoStream]);
 
@@ -842,6 +852,7 @@ export default function LiveCameraView({
               isRestreamed={isRestreamed ?? false}
               isWebRTCAvailable={isWebRTCAvailable}
               webRTCUnavailableReason={webRTCAvailability.reason}
+              streamErrorDetail={streamErrorDetail}
               onResetStream={resetStream}
               supportsAudioOutput={supportsAudioOutput}
               supports2WayTalk={supports2WayTalk}
@@ -1002,6 +1013,7 @@ type FrigateCameraFeaturesProps = {
   isRestreamed: boolean;
   isWebRTCAvailable: boolean;
   webRTCUnavailableReason?: WebRTCUnavailableReason;
+  streamErrorDetail?: string;
   onResetStream: () => void;
   supportsAudioOutput: boolean;
   supports2WayTalk: boolean;
@@ -1033,6 +1045,7 @@ function FrigateCameraFeatures({
   isRestreamed,
   isWebRTCAvailable,
   webRTCUnavailableReason,
+  streamErrorDetail,
   onResetStream,
   supportsAudioOutput,
   supports2WayTalk,
@@ -1533,6 +1546,9 @@ function FrigateCameraFeatures({
                                 {t("stream.lowBandwidth.tips")}
                               </p>
                             </div>
+                            {streamErrorDetail && (
+                              <StreamErrorDetail detail={streamErrorDetail} />
+                            )}
                             <Button
                               className={`flex items-center gap-2.5 rounded-lg`}
                               aria-label={t("stream.lowBandwidth.resetStream")}
@@ -1920,6 +1936,9 @@ function FrigateCameraFeatures({
                               {t("stream.lowBandwidth.tips")}
                             </p>
                           </div>
+                          {streamErrorDetail && (
+                            <StreamErrorDetail detail={streamErrorDetail} />
+                          )}
                           <Button
                             className={`flex items-center gap-2.5 rounded-lg`}
                             aria-label={t("stream.lowBandwidth.resetStream")}
@@ -2042,5 +2061,21 @@ function FrigateCameraFeatures({
         </div>
       </DrawerContent>
     </Drawer>
+  );
+}
+
+type StreamErrorDetailProps = {
+  detail: string;
+};
+
+// go2rtc's own message, so it is shown as is rather than translated
+function StreamErrorDetail({ detail }: StreamErrorDetailProps) {
+  return (
+    <pre
+      className="max-h-32 w-full overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-secondary p-2 text-left font-mono text-xs"
+      title={detail}
+    >
+      {detail}
+    </pre>
   );
 }

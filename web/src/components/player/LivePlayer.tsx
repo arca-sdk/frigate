@@ -52,7 +52,7 @@ type LivePlayerProps = {
   showStats?: boolean;
   onClick?: () => void;
   setFullResolution?: React.Dispatch<React.SetStateAction<VideoResolutionType>>;
-  onError?: (error: LivePlayerError) => void;
+  onError?: (error: LivePlayerError, detail?: string) => void;
   onHealthSample?: (sample: LiveHealthSample) => void;
   streamAuto?: boolean;
   onMicrophoneError?: (error: TwoWayTalkError) => void;
