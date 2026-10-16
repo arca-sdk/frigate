@@ -735,6 +735,9 @@ class CameraWatchdog(threading.Thread):
         if self.ffmpeg_detect_process is not None:
             stop_ffmpeg(self.ffmpeg_detect_process, self.logger)
             self.ffmpeg_detect_process = None
+            # the next detect process reuses the pipe, and an intentional stop
+            # isn't an error to report as part of its output
+            self.logpipe.clear()
         for p in self.ffmpeg_other_processes[:]:
             if p["process"] is not None:
                 stop_ffmpeg(p["process"], self.logger)

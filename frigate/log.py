@@ -151,6 +151,10 @@ class LogPipe(threading.Thread):
         lines = [line for line in self.deque.copy() if line.strip()]
         return lines[-count:]
 
+    def clear(self) -> None:
+        """Drop the buffered lines without logging them."""
+        self.deque.clear()
+
     def dump(self) -> None:
         if not self.deque:
             return

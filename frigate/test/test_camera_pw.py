@@ -45,3 +45,33 @@ class TestUserPassMasking(unittest.TestCase):
         escaped = clean_camera_user_pass(self.rtsp_log_message)
         print(f"The escaped is {escaped}")
         assert escaped == "Did you mean file:rtsp://*:*@192.168.1.3:554"
+
+
+class TestUserPassMaskingUserNames(unittest.TestCase):
+    """Masked text reaches camera viewers through the stats, not only admins."""
+
+    def test_user_names_outside_the_escaping_pattern(self):
+        for user in ("cam.user", "user%40site", "first+last", "user~1"):
+            with self.subTest(user=user):
+                line = f"rtsp://{user}:secret@192.0.2.1:554/live: 401 Unauthorized"
+                assert (
+                    clean_camera_user_pass(line)
+                    == "rtsp://*:*@192.0.2.1:554/live: 401 Unauthorized"
+                )
+
+    def test_password_with_at_signs_and_a_dotted_user(self):
+        masked = clean_camera_user_pass(
+            "[tcp @ 0x55] rtsp://cam.user:p@ss@word@192.0.2.1/live"
+        )
+        assert masked == "[tcp @ 0x55] rtsp://*:*@192.0.2.1/live"
+
+    def test_http_query_with_a_dotted_user(self):
+        masked = clean_camera_user_pass(
+            "http://192.0.2.1/cgi-bin/snap.cgi?user=cam.user&password=secret"
+        )
+        assert masked == "http://192.0.2.1/cgi-bin/snap.cgi?user=*&password=*"
+
+    def test_escaping_still_skips_dotted_user_names(self):
+        # escaping rewrites the ffmpeg input, so its matches must not grow
+        path = "rtsp://cam.user:p@ss@192.0.2.1/live"
+        assert escape_special_characters(path) == path

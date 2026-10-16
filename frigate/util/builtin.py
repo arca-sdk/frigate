@@ -22,6 +22,7 @@ from ruamel.yaml import YAML
 
 from frigate.const import (
     REGEX_HTTP_CAMERA_USER_PASS,
+    REGEX_MASK_CAMERA_USER_PASS,
     REGEX_RTSP_CAMERA_USER_PASS,
     STREAM_TYPE_MAIN,
     STREAM_TYPE_SUB,
@@ -118,7 +119,7 @@ def deep_merge(dct1: dict, dct2: dict, override=False, merge_lists=False) -> dic
 
 def clean_camera_user_pass(line: str) -> str:
     """Removes user and password from line."""
-    rtsp_cleaned = re.sub(REGEX_RTSP_CAMERA_USER_PASS, "://*:*@", line)
+    rtsp_cleaned = re.sub(REGEX_MASK_CAMERA_USER_PASS, "://*:*@", line)
     return re.sub(REGEX_HTTP_CAMERA_USER_PASS, "user=*&password=*", rtsp_cleaned)
 
 

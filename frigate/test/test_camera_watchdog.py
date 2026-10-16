@@ -351,6 +351,9 @@ class TestCameraWatchdogFfmpegError(unittest.TestCase):
             watchdog.stop_all_ffmpeg()
 
         assert ffmpeg_error.value == ""
+        # the next detect process reuses the pipe, so a crash without output
+        # would otherwise report the stopped process's lines
+        watchdog.logpipe.clear.assert_called_once()
 
     def test_watchdog_without_error_metric(self):
         watchdog = build_watchdog()
@@ -386,3 +389,16 @@ class TestLogPipeTail(unittest.TestCase):
 
         # the lines are still there for dump()
         assert log.call_args_list[-1] == call(logpipe.level, "second")
+
+    def test_clear_drops_the_lines_without_logging_them(self):
+        logpipe = LogPipe("ffmpeg.test.detect")
+        os.write(logpipe.fileno(), b"first\nsecond\n")
+        logpipe.close()
+        logpipe.join(5)
+
+        with patch.object(logpipe.logger, "log") as log:
+            logpipe.clear()
+            logpipe.dump()
+
+        assert logpipe.tail(5) == []
+        log.assert_not_called()

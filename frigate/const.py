@@ -117,7 +117,11 @@ SUPPORTED_RK_SOCS = ["rk3562", "rk3566", "rk3568", "rk3576", "rk3588"]
 
 REGEX_CAMERA_NAME = r"^[a-zA-Z0-9_-]+$"
 REGEX_RTSP_CAMERA_USER_PASS = r":\/\/[a-zA-Z0-9_-]+:[\S]+@"
-REGEX_HTTP_CAMERA_USER_PASS = r"user=[a-zA-Z0-9_-]+&password=[\S]+"
+# masking matches any user name, such as "cam.user" or "user%40site", since a
+# missed one shows a password; REGEX_RTSP_CAMERA_USER_PASS stays as narrow as
+# before because escape_special_characters rewrites what it matches
+REGEX_MASK_CAMERA_USER_PASS = r":\/\/[^\s:/@]+:[\S]+@"
+REGEX_HTTP_CAMERA_USER_PASS = r"user=[^\s&]+&password=[\S]+"
 REGEX_JSON = re.compile(r"^\s*\{")
 
 # Known Driver Names
