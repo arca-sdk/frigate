@@ -106,6 +106,8 @@ import { useTranslation } from "react-i18next";
 import { useDocDomain } from "@/hooks/use-doc-domain";
 import { detectCameraAudioFeatures } from "@/utils/cameraUtil";
 import { isRestreamedStream } from "@/utils/liveTranscode";
+import { codecDisplayName, unmatchedVideoCodecs } from "@/utils/codecSupport";
+import CodecUnsupportedHint from "@/components/player/CodecUnsupportedHint";
 import PtzControlPanel from "@/components/overlay/PtzControlPanel";
 import ObjectSettingsView from "../settings/ObjectSettingsView";
 import { useSearchEffect } from "@/hooks/use-overlay-state";
@@ -176,6 +178,9 @@ export default function LiveCameraView({
   // the server's message for the error that caused the fallback, kept through
   // a WebRTC attempt that fails without one
   const [streamErrorDetail, setStreamErrorDetail] = useState<string>();
+  // set when go2rtc had no video codec this browser plays, empty when go2rtc
+  // didn't say which codecs the stream has
+  const [unsupportedCodecs, setUnsupportedCodecs] = useState<string[]>();
 
   const liveStreams = useMemo(
     () => Object.values(camera.live.streams || {}),
@@ -526,6 +531,12 @@ export default function LiveCameraView({
     }
   }, [webRTCVerdictPending]);
 
+  // Unlike the latches above this survives auto stepping down to another
+  // stream, which is when it explains why auto did.
+  useEffect(() => {
+    setUnsupportedCodecs(undefined);
+  }, [userPreferredLiveMode, pinnedStream, forceLowBandwidth]);
+
   useKeyboardListener(["m", "Escape"], (key, modifiers) => {
     if (!modifiers.down) {
       return true;
@@ -643,6 +654,10 @@ export default function LiveCameraView({
           setStreamErrorDetail(detail);
         }
 
+        if (e === "mse-codec") {
+          setUnsupportedCodecs(detail ? unmatchedVideoCodecs(detail) : []);
+        }
+
         // auto answers congestion and codec failures with a lower stream
         if (autoHandleError(e)) {
           return;
@@ -664,6 +679,7 @@ export default function LiveCameraView({
   const resetStream = useCallback(() => {
     setLowBandwidth(false);
     setStreamErrorDetail(undefined);
+    setUnsupportedCodecs(undefined);
     resetAutoStream();
   }, [resetAutoStream]);
 
@@ -866,6 +882,7 @@ export default function LiveCameraView({
               isWebRTCAvailable={isWebRTCAvailable}
               webRTCUnavailableReason={webRTCAvailability.reason}
               streamErrorDetail={streamErrorDetail}
+              unsupportedCodecs={unsupportedCodecs}
               onResetStream={resetStream}
               supportsAudioOutput={supportsAudioOutput}
               supports2WayTalk={supports2WayTalk}
@@ -1027,6 +1044,7 @@ type FrigateCameraFeaturesProps = {
   isWebRTCAvailable: boolean;
   webRTCUnavailableReason?: WebRTCUnavailableReason;
   streamErrorDetail?: string;
+  unsupportedCodecs?: string[];
   onResetStream: () => void;
   supportsAudioOutput: boolean;
   supports2WayTalk: boolean;
@@ -1059,6 +1077,7 @@ function FrigateCameraFeatures({
   isWebRTCAvailable,
   webRTCUnavailableReason,
   streamErrorDetail,
+  unsupportedCodecs,
   onResetStream,
   supportsAudioOutput,
   supports2WayTalk,
@@ -1068,6 +1087,14 @@ function FrigateCameraFeatures({
 }: FrigateCameraFeaturesProps) {
   const { t } = useTranslation(["views/live", "components/dialog"]);
   const { getLocaleDocUrl } = useDocDomain();
+
+  const lowBandwidthTips = unsupportedCodecs
+    ? unsupportedCodecs.length > 0
+      ? t("stream.codecUnsupported.lowBandwidth", {
+          codec: unsupportedCodecs.map(codecDisplayName).join(", "),
+        })
+      : t("stream.codecUnsupported.lowBandwidthUnknown")
+    : t("stream.lowBandwidth.tips");
 
   const { payload: detectState, send: sendDetect } = useDetectState(
     camera.name,
@@ -1440,6 +1467,7 @@ function FrigateCameraFeatures({
                         playingStream={playingStream}
                         autoAvailable={autoAvailable}
                         autoReason={autoReason}
+                        unsupportedCodecs={unsupportedCodecs}
                         onSelect={onSelectStream}
                         onRetry={onResetStream}
                         disabled={debug || forceLowBandwidth}
@@ -1555,12 +1583,16 @@ function FrigateCameraFeatures({
                             <div className="flex flex-row items-center gap-2">
                               <IoIosWarning className="mr-1 size-8 text-danger" />
 
-                              <p className="text-sm">
-                                {t("stream.lowBandwidth.tips")}
-                              </p>
+                              <p className="text-sm">{lowBandwidthTips}</p>
                             </div>
-                            {streamErrorDetail && (
-                              <StreamErrorDetail detail={streamErrorDetail} />
+                            {unsupportedCodecs ? (
+                              <CodecUnsupportedHint
+                                codecs={unsupportedCodecs}
+                              />
+                            ) : (
+                              streamErrorDetail && (
+                                <StreamErrorDetail detail={streamErrorDetail} />
+                              )
                             )}
                             <Button
                               className={`flex items-center gap-2.5 rounded-lg`}
@@ -1835,6 +1867,7 @@ function FrigateCameraFeatures({
                       playingStream={playingStream}
                       autoAvailable={autoAvailable}
                       autoReason={autoReason}
+                      unsupportedCodecs={unsupportedCodecs}
                       onSelect={onSelectStream}
                       onRetry={onResetStream}
                       disabled={debug || forceLowBandwidth}
@@ -1945,12 +1978,14 @@ function FrigateCameraFeatures({
                         <div className="mt-2 flex flex-col items-center gap-3">
                           <div className="flex flex-row items-center gap-2">
                             <IoIosWarning className="mr-1 size-8 text-danger" />
-                            <p className="text-sm">
-                              {t("stream.lowBandwidth.tips")}
-                            </p>
+                            <p className="text-sm">{lowBandwidthTips}</p>
                           </div>
-                          {streamErrorDetail && (
-                            <StreamErrorDetail detail={streamErrorDetail} />
+                          {unsupportedCodecs ? (
+                            <CodecUnsupportedHint codecs={unsupportedCodecs} />
+                          ) : (
+                            streamErrorDetail && (
+                              <StreamErrorDetail detail={streamErrorDetail} />
+                            )
                           )}
                           <Button
                             className={`flex items-center gap-2.5 rounded-lg`}

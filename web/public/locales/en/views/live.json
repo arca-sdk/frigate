@@ -169,6 +169,16 @@
         "desc": "Always play Frigate's built-in low-bandwidth feed instead of the selected stream. Works on any connection, but has lower quality and no audio."
       }
     },
+    "codecUnsupported": {
+      "lowBandwidth": "Live view is in low-bandwidth mode because this browser can't play this camera's {{codec}} video.",
+      "lowBandwidthUnknown": "Live view is in low-bandwidth mode because this browser can't play this camera's video codec.",
+      "fixes": "To watch in full quality, do one of these:",
+      "camera": "Set the camera's video codec to H.264 in its own settings (recommended).",
+      "config": "In the Frigate config, use an H.264 stream for live view, such as the camera's substream, or transcode to H.264 with go2rtc.",
+      "browser": "Use a browser that can play {{codec}} video.",
+      "browserHevc": "Use a browser that can play H.265 video, such as Safari.",
+      "browserUnknown": "Use a browser that can play this camera's video."
+    },
     "playInBackground": {
       "label": "Play in background",
       "tips": "Enable this option to continue streaming when the player is hidden."

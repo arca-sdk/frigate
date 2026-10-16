@@ -12,7 +12,9 @@ import { LivePage } from "../pages/live.page";
 
 // the mocked profile is admin, so useUserPersistence keys are namespaced
 const STREAM_KEY = "front_door-stream:admin";
-const CODEC_ERROR = "mse: streams: codecs not matched: H265 => H264";
+// go2rtc 1.9's reply for an H.265 stream to a browser without H.265 MSE
+const CODEC_ERROR =
+  "mse: streams: codecs not matched: video:H265 => video:H264, audio:AAC, audio:PCMA, audio:PCMU, audio:OPUS";
 
 const CONFIG = {
   go2rtc: {
@@ -206,6 +208,11 @@ test.describe("Auto live stream selector", () => {
     await expect(streamTrigger(menu)).toHaveText("Auto · Sub");
     await expect(
       menu.getByText(/because this browser can't play a higher-quality stream/),
+    ).toBeVisible();
+    await expect(
+      menu.getByText(
+        "Use a browser that can play H.265 video, such as Safari.",
+      ),
     ).toBeVisible();
   });
 
@@ -446,5 +453,60 @@ test.describe("Live stream errors", () => {
       menu.getByText(/Live view is in low-bandwidth mode/),
     ).toBeHidden({ timeout: 10_000 });
     await expect(menu.locator("pre")).toHaveCount(0);
+  });
+});
+
+test.describe("Unsupported video codec", () => {
+  test.use({ expectedErrors: [/MSE error 'mse-codec'/] });
+
+  test.beforeEach(({ frigateApp }) => {
+    test.skip(frigateApp.isMobile, "Desktop dropdown only");
+  });
+
+  test("the low-bandwidth notice names the codec and the fixes", async ({
+    frigateApp,
+  }) => {
+    await frigateApp.installDefaults({ config: CONFIG });
+    await mockGo2rtc(frigateApp.page, ["backyard"]);
+
+    await frigateApp.goto("/#backyard");
+
+    const menu = await openDesktopSettings(frigateApp.page);
+    await expect(
+      menu.getByText(
+        "Live view is in low-bandwidth mode because this browser can't play this camera's H.265 video.",
+      ),
+    ).toBeVisible({ timeout: 10_000 });
+    await expect(menu.getByText(/video codec to H\.264/)).toBeVisible();
+    await expect(
+      menu.getByText(/transcode to H\.264 with go2rtc/),
+    ).toBeVisible();
+    await expect(menu.getByText(/such as Safari/)).toBeVisible();
+    await expect(
+      menu.getByRole("link", { name: "Read the documentation" }).last(),
+    ).toHaveAttribute("href", /troubleshooting\/go2rtc/);
+    // the friendly text replaces go2rtc's own message
+    await expect(menu.locator("pre")).toHaveCount(0);
+  });
+
+  test("a codec error without codec names still explains the fixes", async ({
+    frigateApp,
+  }) => {
+    await frigateApp.installDefaults({ config: CONFIG });
+    await mockGo2rtc(
+      frigateApp.page,
+      ["backyard"],
+      "mse: streams: codecs not matched",
+    );
+
+    await frigateApp.goto("/#backyard");
+
+    const menu = await openDesktopSettings(frigateApp.page);
+    await expect(
+      menu.getByText(/can't play this camera's video codec/),
+    ).toBeVisible({ timeout: 10_000 });
+    await expect(
+      menu.getByText("Use a browser that can play this camera's video."),
+    ).toBeVisible();
   });
 });

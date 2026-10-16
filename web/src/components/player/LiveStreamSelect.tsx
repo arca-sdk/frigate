@@ -12,6 +12,7 @@ import { useTranslation } from "react-i18next";
 import { LuInfo } from "react-icons/lu";
 import { MdOutlineRestartAlt } from "react-icons/md";
 import { Button } from "@/components/ui/button";
+import CodecUnsupportedHint from "./CodecUnsupportedHint";
 
 // Radix Select needs a non-empty value. Auto itself is stored as the
 // absence of a pinned stream
@@ -24,6 +25,8 @@ type LiveStreamSelectProps = {
   playingStream: string;
   autoAvailable: boolean;
   autoReason?: LiveAutoReason;
+  // video codecs of the stream auto stepped down from, when go2rtc said
+  unsupportedCodecs?: string[];
   // undefined selects auto
   onSelect: (stream: string | undefined) => void;
   // sends auto back to the top of the ladder
@@ -37,6 +40,7 @@ export default function LiveStreamSelect({
   playingStream,
   autoAvailable,
   autoReason,
+  unsupportedCodecs,
   onSelect,
   onRetry,
   disabled,
@@ -105,6 +109,10 @@ export default function LiveStreamSelect({
               })}
             </div>
           </div>
+
+          {autoReason === "codec" && unsupportedCodecs && (
+            <CodecUnsupportedHint codecs={unsupportedCodecs} />
+          )}
 
           {/* data saver pins the lowest stream, so there is no higher one to try */}
           {autoReason !== "saveData" && (
