@@ -347,6 +347,31 @@ test.describe("Live stream errors", () => {
     await expect(menu.locator("pre")).toHaveText(sourceError);
   });
 
+  test("Auto at the low-bandwidth floor shows go2rtc's error", async ({
+    frigateApp,
+  }) => {
+    const sourceError =
+      "mse: streams: dial tcp 10.0.0.1:554: connect: connection refused";
+    await frigateApp.installDefaults({ config: CONFIG });
+    const opened = await mockGo2rtc(
+      frigateApp.page,
+      ["front_door", "front_door_sub"],
+      sourceError,
+    );
+
+    await frigateApp.goto("/#front_door");
+
+    // auto steps down through every stream before the floor
+    await expect
+      .poll(() => opened, { timeout: 10_000 })
+      .toContain("front_door_sub");
+    const menu = await openDesktopSettings(frigateApp.page);
+    await expect(streamTrigger(menu)).toHaveText("Auto · Low bandwidth", {
+      timeout: 10_000,
+    });
+    await expect(menu.locator("pre")).toHaveText(sourceError);
+  });
+
   test("Reset stream clears go2rtc's error", async ({ frigateApp }) => {
     await frigateApp.installDefaults({ config: CONFIG });
     const failing = ["backyard"];

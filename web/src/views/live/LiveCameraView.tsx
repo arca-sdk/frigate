@@ -626,13 +626,16 @@ export default function LiveCameraView({
   const handleError = useCallback(
     (e: LivePlayerError, detail?: string) => {
       if (e) {
+        // before auto's answer: when auto steps down from its last stream to
+        // the low-bandwidth floor, the notice shows this. A step to another
+        // stream changes the stream name, which clears it.
+        if (detail) {
+          setStreamErrorDetail(detail);
+        }
+
         // auto answers congestion and codec failures with a lower stream
         if (autoHandleError(e)) {
           return;
-        }
-
-        if (detail) {
-          setStreamErrorDetail(detail);
         }
 
         // WebRTC can now be the user's own choice, so the fallback flag no
