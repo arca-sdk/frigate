@@ -372,6 +372,43 @@ test.describe("Live stream errors", () => {
     await expect(menu.locator("pre")).toHaveText(sourceError);
   });
 
+  test("the floor keeps go2rtc's error when the WebRTC check finishes", async ({
+    frigateApp,
+  }) => {
+    const sourceError =
+      "mse: streams: dial tcp 10.0.0.1:554: connect: connection refused";
+    await frigateApp.installDefaults({
+      config: {
+        ...CONFIG,
+        go2rtc: {
+          ...CONFIG.go2rtc,
+          webrtc: { candidates: ["192.168.1.10:8555"], ice_servers: [] },
+        },
+      },
+    });
+    // the check stays pending until its timeout, after auto reached the floor
+    await frigateApp.page.routeWebSocket("**/live/webrtc/api/ws**", () => {});
+    const verdict = frigateApp.page.waitForEvent("console", {
+      predicate: (message) => message.text().includes("WebRTC unavailable"),
+      timeout: 20_000,
+    });
+    const opened = await mockGo2rtc(
+      frigateApp.page,
+      ["front_door", "front_door_sub"],
+      sourceError,
+    );
+
+    await frigateApp.goto("/#front_door");
+
+    await expect
+      .poll(() => opened, { timeout: 10_000 })
+      .toContain("front_door_sub");
+    await verdict;
+    const menu = await openDesktopSettings(frigateApp.page);
+    await expect(streamTrigger(menu)).toHaveText("Auto · Low bandwidth");
+    await expect(menu.locator("pre")).toHaveText(sourceError);
+  });
+
   test("Reset stream clears go2rtc's error", async ({ frigateApp }) => {
     await frigateApp.installDefaults({ config: CONFIG });
     const failing = ["backyard"];

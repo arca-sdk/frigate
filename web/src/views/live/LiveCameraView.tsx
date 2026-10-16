@@ -507,12 +507,22 @@ export default function LiveCameraView({
     setStreamErrorDetail(undefined);
   }, [userPreferredLiveMode, streamName, forceLowBandwidth]);
 
+  // read by the effect below without making it rerun when the floor changes
+  const atFloorRef = useRef(autoStream.atFloor);
+  useEffect(() => {
+    atFloorRef.current = autoStream.atFloor;
+  }, [autoStream.atFloor]);
+
   // A fallback chosen before the verdict arrived was made on incomplete info.
   useEffect(() => {
     if (!webRTCVerdictPending) {
       setWebRTC(false);
       setLowBandwidth(false);
-      setStreamErrorDetail(undefined);
+      // auto's floor isn't reset here and keeps showing the low-bandwidth
+      // notice, which still needs the error behind it
+      if (!atFloorRef.current) {
+        setStreamErrorDetail(undefined);
+      }
     }
   }, [webRTCVerdictPending]);
 
