@@ -270,6 +270,21 @@ class TestCameraWatchdogFfmpegError(unittest.TestCase):
         watchdog.start_ffmpeg_detect.assert_not_called()
         assert ffmpeg_error.value == "\n".join(FFMPEG_EXIT_LINES)
 
+    def test_published_error_has_no_url_secrets(self):
+        watchdog, ffmpeg_error = self._build_watchdog()
+        watchdog.capture_thread.is_alive.return_value = False
+        watchdog.logpipe.tail.return_value = [
+            "http://192.0.2.1/live?token=secret: Server returned 403 Forbidden"
+        ]
+
+        watchdog.reset_capture_thread(terminate=False)
+
+        # the stats reach camera viewers, who can't read the logs
+        assert (
+            ffmpeg_error.value
+            == "http://192.0.2.1/live?token=*: Server returned 403 Forbidden"
+        )
+
     def test_restart_publishes_before_the_log_pipe_is_emptied(self):
         watchdog, ffmpeg_error = self._build_watchdog()
         watchdog.capture_thread.is_alive.return_value = False
@@ -393,12 +408,23 @@ class TestLogPipeTail(unittest.TestCase):
     def test_clear_drops_the_lines_without_logging_them(self):
         logpipe = LogPipe("ffmpeg.test.detect")
         os.write(logpipe.fileno(), b"first\nsecond\n")
+        logpipe.clear()
         logpipe.close()
         logpipe.join(5)
 
         with patch.object(logpipe.logger, "log") as log:
-            logpipe.clear()
             logpipe.dump()
 
         assert logpipe.tail(5) == []
         log.assert_not_called()
+
+    def test_clear_includes_lines_the_reader_has_not_read_yet(self):
+        logpipe = LogPipe("ffmpeg.test.detect")
+        # the stopped process's last lines can still be in the pipe
+        os.write(logpipe.fileno(), b"from the stopped process\n")
+        logpipe.clear()
+        os.write(logpipe.fileno(), b"from the next process\n")
+        logpipe.close()
+        logpipe.join(5)
+
+        assert logpipe.tail(5) == ["from the next process"]

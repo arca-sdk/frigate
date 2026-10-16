@@ -123,6 +123,24 @@ def clean_camera_user_pass(line: str) -> str:
     return re.sub(REGEX_HTTP_CAMERA_USER_PASS, "user=*&password=*", rtsp_cleaned)
 
 
+# ffmpeg prints "url: message", so a colon ending the URL is not part of it
+_URL = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://\S+?(?=:?(?:\s|$))")
+_QUERY_VALUE = re.compile(r"([?&][^=&\s#]+)=[^&\s#]*")
+
+
+def redact_url_secrets(line: str) -> str:
+    """Remove credentials and every query parameter value from URLs in line.
+
+    For text shown to users who can't read the logs: a camera URL can carry a
+    secret in any query parameter, such as ?token=, so no list of names is
+    safe. Parameter names are kept since they help read the error.
+    """
+    return _URL.sub(
+        lambda url: _QUERY_VALUE.sub(r"\1=*", url.group(0)),
+        clean_camera_user_pass(line),
+    )
+
+
 def escape_special_characters(path: str) -> str:
     """Cleans reserved characters to encodings for ffmpeg."""
     if len(path) > 1000:

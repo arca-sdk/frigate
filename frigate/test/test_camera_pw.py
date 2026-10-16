@@ -2,7 +2,11 @@
 
 import unittest
 
-from frigate.util.builtin import clean_camera_user_pass, escape_special_characters
+from frigate.util.builtin import (
+    clean_camera_user_pass,
+    escape_special_characters,
+    redact_url_secrets,
+)
 
 
 class TestUserPassCleanup(unittest.TestCase):
@@ -75,3 +79,32 @@ class TestUserPassMaskingUserNames(unittest.TestCase):
         # escaping rewrites the ffmpeg input, so its matches must not grow
         path = "rtsp://cam.user:p@ss@192.0.2.1/live"
         assert escape_special_characters(path) == path
+
+
+class TestRedactUrlSecrets(unittest.TestCase):
+    def test_token_without_user_and_password(self):
+        assert (
+            redact_url_secrets("http://192.0.2.1/live?token=secret: 403 Forbidden")
+            == "http://192.0.2.1/live?token=*: 403 Forbidden"
+        )
+
+    def test_every_query_value_and_the_credentials(self):
+        assert (
+            redact_url_secrets(
+                "rtsp://cam.user:pw@192.0.2.1/live?channel=1&key=abc#frag failed"
+            )
+            == "rtsp://*:*@192.0.2.1/live?channel=*&key=*#frag failed"
+        )
+
+    def test_ffmpeg_tcp_error(self):
+        assert redact_url_secrets(
+            "[tcp @ 0x55] Connection to tcp://192.0.2.1:554?timeout=10000000 "
+            "failed: No route to host"
+        ) == (
+            "[tcp @ 0x55] Connection to tcp://192.0.2.1:554?timeout=* "
+            "failed: No route to host"
+        )
+
+    def test_text_without_urls_is_unchanged(self):
+        line = "Error opening output files: Invalid argument (a=1&b=2)"
+        assert redact_url_secrets(line) == line

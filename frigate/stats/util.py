@@ -315,7 +315,7 @@ def stats_snapshot(
             "ffmpeg_pid": ffmpeg_pid,
             "audio_rms": round(camera_stats.audio_rms.value, 4),
             "audio_dBFS": round(camera_stats.audio_dBFS.value, 4),
-            # credentials are already removed by the ffmpeg log pipe
+            # the watchdog removes credentials and URL query values
             "ffmpeg_error": camera_stats.ffmpeg_error.value or None,
             **connection_quality,
         }

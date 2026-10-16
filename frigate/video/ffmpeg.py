@@ -33,7 +33,11 @@ from frigate.const import (
     STREAM_TYPE_TO_ROLE,
 )
 from frigate.log import LogPipe
-from frigate.util.builtin import EventsPerSecond, get_record_segment_time
+from frigate.util.builtin import (
+    EventsPerSecond,
+    get_record_segment_time,
+    redact_url_secrets,
+)
 from frigate.util.ffmpeg import start_or_restart_ffmpeg, stop_ffmpeg
 from frigate.util.image import (
     FrameManager,
@@ -329,8 +333,11 @@ class CameraWatchdog(threading.Thread):
     def _report_ffmpeg_error(self) -> None:
         """Publish the last lines the detect ffmpeg process printed."""
         # ffmpeg prints the cause before the summary, so a single line is often
-        # just "Error opening output files: Invalid argument"
-        lines = self.logpipe.tail(FFMPEG_ERROR_LINES)
+        # just "Error opening output files: Invalid argument". The stats reach
+        # camera viewers, not only admins, so URL secrets are removed.
+        lines = [
+            redact_url_secrets(line) for line in self.logpipe.tail(FFMPEG_ERROR_LINES)
+        ]
 
         if lines:
             self._publish_ffmpeg_error("\n".join(lines))
