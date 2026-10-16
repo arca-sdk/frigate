@@ -73,7 +73,8 @@ async function readIdb(page: Page, key: string) {
 async function mockGo2rtc(
   page: Page,
   failing: string[] = [],
-  error: string = CODEC_ERROR,
+  // one error for every failing stream, or one per stream
+  error: string | Record<string, string> = CODEC_ERROR,
 ) {
   const opened: string[] = [];
 
@@ -90,7 +91,10 @@ async function mockGo2rtc(
       ws.send(
         JSON.stringify(
           failing.includes(src)
-            ? { type: "error", value: error }
+            ? {
+                type: "error",
+                value: typeof error === "string" ? error : error[src],
+              }
             : { type: "mse", value: 'video/mp4; codecs="avc1.640029"' },
         ),
       );
@@ -457,7 +461,7 @@ test.describe("Live stream errors", () => {
 });
 
 test.describe("Unsupported video codec", () => {
-  test.use({ expectedErrors: [/MSE error 'mse-codec'/] });
+  test.use({ expectedErrors: [/MSE error '(mse-codec|startup)'/] });
 
   test.beforeEach(({ frigateApp }) => {
     test.skip(frigateApp.isMobile, "Desktop dropdown only");
@@ -487,6 +491,28 @@ test.describe("Unsupported video codec", () => {
     ).toHaveAttribute("href", /troubleshooting\/go2rtc/);
     // the friendly text replaces go2rtc's own message
     await expect(menu.locator("pre")).toHaveCount(0);
+  });
+
+  test("a later error on a lower stream replaces the codec hint", async ({
+    frigateApp,
+  }) => {
+    const subError =
+      "mse: streams: dial tcp 10.0.0.1:554: connect: connection refused";
+    await frigateApp.installDefaults({ config: CONFIG });
+    await mockGo2rtc(frigateApp.page, ["front_door", "front_door_sub"], {
+      front_door: CODEC_ERROR,
+      front_door_sub: subError,
+    });
+
+    await frigateApp.goto("/#front_door");
+
+    // auto skipped the H.265 main stream, then the sub stream failed too
+    const menu = await openDesktopSettings(frigateApp.page);
+    await expect(streamTrigger(menu)).toHaveText("Auto · Low bandwidth", {
+      timeout: 10_000,
+    });
+    await expect(menu.locator("pre")).toHaveText(subError);
+    await expect(menu.getByText(/can't play this camera's/)).toHaveCount(0);
   });
 
   test("a codec error without codec names still explains the fixes", async ({

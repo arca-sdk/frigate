@@ -179,7 +179,8 @@ export default function LiveCameraView({
   // a WebRTC attempt that fails without one
   const [streamErrorDetail, setStreamErrorDetail] = useState<string>();
   // set when go2rtc had no video codec this browser plays, empty when go2rtc
-  // didn't say which codecs the stream has
+  // didn't say which codecs the stream has. Explains auto's step down; the
+  // low-bandwidth notice reads the error behind the fallback instead.
   const [unsupportedCodecs, setUnsupportedCodecs] = useState<string[]>();
 
   const liveStreams = useMemo(
@@ -655,7 +656,7 @@ export default function LiveCameraView({
         }
 
         if (e === "mse-codec") {
-          setUnsupportedCodecs(detail ? unmatchedVideoCodecs(detail) : []);
+          setUnsupportedCodecs(unmatchedVideoCodecs(detail ?? "") ?? []);
         }
 
         // auto answers congestion and codec failures with a lower stream
@@ -1088,10 +1089,15 @@ function FrigateCameraFeatures({
   const { t } = useTranslation(["views/live", "components/dialog"]);
   const { getLocaleDocUrl } = useDocDomain();
 
-  const lowBandwidthTips = unsupportedCodecs
-    ? unsupportedCodecs.length > 0
+  // from the error behind the fallback, which can differ from the codec auto
+  // stepped down for when a lower stream later fails for another reason
+  const fallbackCodecs = streamErrorDetail
+    ? unmatchedVideoCodecs(streamErrorDetail)
+    : undefined;
+  const lowBandwidthTips = fallbackCodecs
+    ? fallbackCodecs.length > 0
       ? t("stream.codecUnsupported.lowBandwidth", {
-          codec: unsupportedCodecs.map(codecDisplayName).join(", "),
+          codec: fallbackCodecs.map(codecDisplayName).join(", "),
         })
       : t("stream.codecUnsupported.lowBandwidthUnknown")
     : t("stream.lowBandwidth.tips");
@@ -1585,10 +1591,8 @@ function FrigateCameraFeatures({
 
                               <p className="text-sm">{lowBandwidthTips}</p>
                             </div>
-                            {unsupportedCodecs ? (
-                              <CodecUnsupportedHint
-                                codecs={unsupportedCodecs}
-                              />
+                            {fallbackCodecs ? (
+                              <CodecUnsupportedHint codecs={fallbackCodecs} />
                             ) : (
                               streamErrorDetail && (
                                 <StreamErrorDetail detail={streamErrorDetail} />
@@ -1980,8 +1984,8 @@ function FrigateCameraFeatures({
                             <IoIosWarning className="mr-1 size-8 text-danger" />
                             <p className="text-sm">{lowBandwidthTips}</p>
                           </div>
-                          {unsupportedCodecs ? (
-                            <CodecUnsupportedHint codecs={unsupportedCodecs} />
+                          {fallbackCodecs ? (
+                            <CodecUnsupportedHint codecs={fallbackCodecs} />
                           ) : (
                             streamErrorDetail && (
                               <StreamErrorDetail detail={streamErrorDetail} />

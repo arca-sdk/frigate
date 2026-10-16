@@ -76,9 +76,16 @@ export function isCodecFamilySupported(
  * Video codecs a go2rtc stream offers, read from the error go2rtc sends when
  * none of the stream's codecs is one the browser asked for:
  * "codecs not matched: video:H265 => video:H264, audio:AAC". The stream's
- * codecs come before the arrow, the browser's after it.
+ * codecs come before the arrow, the browser's after it. Undefined for any
+ * other error, empty when go2rtc didn't list the codecs.
  */
-export function unmatchedVideoCodecs(go2rtcError: string): string[] {
+export function unmatchedVideoCodecs(
+  go2rtcError: string,
+): string[] | undefined {
+  if (!go2rtcError.includes("codecs not matched")) {
+    return undefined;
+  }
+
   const offered = go2rtcError.match(/codecs not matched: (.*?) =>/)?.[1];
 
   if (!offered) {
