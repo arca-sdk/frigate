@@ -167,7 +167,9 @@ class LogPipe(threading.Thread):
         them rather than this clearing it right away. Call it once the process
         writing to the pipe has exited.
         """
-        os.write(self.fdWrite, _CLEAR_MARKER.encode())
+        # the newline ends an unterminated last line, which readline() would
+        # otherwise join to the marker
+        os.write(self.fdWrite, f"\n{_CLEAR_MARKER}".encode())
 
     def dump(self) -> None:
         if not self.deque:

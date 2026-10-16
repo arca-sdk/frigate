@@ -428,3 +428,13 @@ class TestLogPipeTail(unittest.TestCase):
         logpipe.join(5)
 
         assert logpipe.tail(5) == ["from the next process"]
+
+    def test_clear_after_an_unterminated_last_line(self):
+        logpipe = LogPipe("ffmpeg.test.detect")
+        os.write(logpipe.fileno(), b"stopped process, no newline")
+        logpipe.clear()
+        os.write(logpipe.fileno(), b"from the next process\n")
+        logpipe.close()
+        logpipe.join(5)
+
+        assert logpipe.tail(5) == ["from the next process"]
