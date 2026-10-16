@@ -13,6 +13,44 @@ import { LivePage } from "../pages/live.page";
 // the mocked profile is admin, so useUserPersistence keys are namespaced
 const STREAMING_KEY = "streaming-settings:admin";
 
+// Serves the app at another origin through the preview server, so the page
+// sees that host in window.location. Register it before installDefaults: the
+// newest route runs first, so the API mocks still answer before this does.
+async function serveAt(page: Page, origin: string) {
+  const preview = test.info().project.use.baseURL ?? "http://localhost:4173";
+  const previewHost = new URL(preview).host;
+
+  await page.route(
+    (url) => url.origin === origin,
+    async (route) => {
+      const url = new URL(route.request().url());
+      const response = await route.fetch({
+        url: `${preview}${url.pathname}${url.search}`,
+        headers: { ...route.request().headers(), host: previewHost },
+      });
+      await route.fulfill({ response });
+    },
+  );
+}
+
+// opens the camera's settings menu and the technology select
+async function openWebRTCOption(page: Page) {
+  const live = new LivePage(page, true);
+  await expect(live.backButton).toBeVisible({ timeout: 10_000 });
+  await page.locator("button:has(svg)").last().click();
+
+  const menu = page.locator('[role="menu"], [data-radix-menu-content]').first();
+  await expect(menu).toBeVisible({ timeout: 3_000 });
+  await menu
+    .locator('div:has(> label[for="streaming-mode"]) [role="combobox"]')
+    .first()
+    .click();
+
+  const option = page.getByRole("option", { name: /WebRTC/ });
+  await expect(option).toBeVisible({ timeout: 3_000 });
+  return option;
+}
+
 async function writeIdb(page: Page, entries: Record<string, unknown>) {
   await page.evaluate(async (data) => {
     await new Promise<void>((resolve, reject) => {
@@ -458,4 +496,55 @@ test.describe("WebRTC availability gating @critical @mobile", () => {
     const mseOption = frigateApp.page.getByRole("option", { name: /MSE/ });
     await expect(mseOption).not.toHaveAttribute("aria-disabled", "true");
   });
+});
+
+test.describe("WebRTC setup note address", () => {
+  test.beforeEach(({ frigateApp }) => {
+    test.skip(frigateApp.isMobile, "Desktop dropdown only");
+  });
+
+  const generic =
+    "this server's IP address and port 8555 under go2rtc → webrtc → candidates";
+
+  for (const { host, note } of [
+    {
+      host: "192.0.2.10",
+      note: "add 192.0.2.10:8555 under go2rtc → webrtc → candidates",
+    },
+    // only reachable from the server itself
+    { host: "127.0.0.1", note: generic },
+    // a listen address, not one to connect to
+    { host: "0.0.0.0", note: generic },
+    // may not resolve inside the container
+    { host: "frigate.test", note: generic },
+    { host: "[2001:db8::1]", note: generic },
+  ]) {
+    test(`Frigate opened at ${host}`, async ({ frigateApp }) => {
+      const origin = `http://${host}:4173`;
+      await serveAt(frigateApp.page, origin);
+      await frigateApp.installDefaults({
+        config: {
+          go2rtc: {
+            streams: { front_door: ["rtsp://127.0.0.1:8554/front_door"] },
+            webrtc: { candidates: [], ice_servers: [] },
+          },
+        },
+      });
+      await frigateApp.page.route(
+        "**/api/go2rtc/streams/front_door**",
+        (route) =>
+          route.fulfill({
+            json: {
+              producers: [{ medias: ["video, recvonly, H264"] }],
+              consumers: [],
+            },
+          }),
+      );
+
+      await frigateApp.page.goto(`${origin}/#front_door`);
+
+      const option = await openWebRTCOption(frigateApp.page);
+      await expect(option).toContainText(note);
+    });
+  }
 });
