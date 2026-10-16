@@ -78,6 +78,16 @@ class TestUserPassMaskingUserNames(unittest.TestCase):
             == "rtsp://*:*@192.0.2.1/live,rtsp://*:*@192.0.2.2/live"
         )
 
+    def test_at_signs_after_the_host_are_not_masked(self):
+        assert (
+            clean_camera_user_pass("rtsp://cam:p@ss@192.0.2.1/live?tag=a@b failed")
+            == "rtsp://*:*@192.0.2.1/live?tag=a@b failed"
+        )
+
+    def test_a_port_is_not_taken_for_a_password(self):
+        line = "rtsp://192.0.2.1:554/live?tag=a@b: Connection refused"
+        assert clean_camera_user_pass(line) == line
+
     def test_http_query_with_a_dotted_user(self):
         masked = clean_camera_user_pass(
             "http://192.0.2.1/cgi-bin/snap.cgi?user=cam.user&password=secret"
