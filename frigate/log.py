@@ -144,6 +144,13 @@ class LogPipe(threading.Thread):
 
         self.pipeReader.close()
 
+    def tail(self, count: int) -> list[str]:
+        """Return the last non-empty lines without consuming them."""
+        # copy() is atomic, iterating the deque while the reader thread appends
+        # to it is not
+        lines = [line for line in self.deque.copy() if line.strip()]
+        return lines[-count:]
+
     def dump(self) -> None:
         if not self.deque:
             return

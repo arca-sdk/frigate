@@ -128,6 +128,7 @@ class CameraHost(FrigateProcess):
             metrics.detection_frame,
             camera.stop_event,
             capture_thread_id=metrics.capture_process_pid,
+            ffmpeg_error=metrics.ffmpeg_error,
         )
 
         def track() -> None:

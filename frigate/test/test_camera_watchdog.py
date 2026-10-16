@@ -1,16 +1,21 @@
 """Tests for per stream recording health tracking in the camera watchdog."""
 
+import os
 import unittest
 from datetime import UTC, datetime, timedelta
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, call, patch
 
 from frigate.config import FrigateConfig
 from frigate.const import STREAM_TYPE_MAIN, STREAM_TYPE_SUB
+from frigate.log import LogPipe
 from frigate.video.ffmpeg import CameraWatchdog
 
 
 def build_watchdog(
-    sub_enabled: bool = True, output_args: dict | None = None
+    sub_enabled: bool = True,
+    output_args: dict | None = None,
+    ffmpeg_error: SimpleNamespace | None = None,
 ) -> CameraWatchdog:
     config = FrigateConfig(
         **{
@@ -57,6 +62,7 @@ def build_watchdog(
             MagicMock(),
             MagicMock(),
             MagicMock(),
+            ffmpeg_error=ffmpeg_error,
         )
 
     return watchdog
@@ -223,3 +229,160 @@ class TestCameraWatchdogStreamHealth(unittest.TestCase):
 
         assert watchdog.record_stale_threshold[STREAM_TYPE_MAIN] == 120
         assert watchdog.record_stale_threshold[STREAM_TYPE_SUB] == 150
+
+
+FFMPEG_EXIT_LINES = [
+    "Option hwaccel (use HW accelerated decoding) cannot be applied to output "
+    "url vaapi -- you are trying to apply an input option to an output file or "
+    "vice versa. Move this option before the file it belongs to.",
+    "Error parsing options for output file vaapi.",
+    "Error opening output files: Invalid argument",
+]
+
+
+class TestCameraWatchdogFfmpegError(unittest.TestCase):
+    def _build_watchdog(self) -> tuple[CameraWatchdog, SimpleNamespace]:
+        ffmpeg_error = SimpleNamespace(value="")
+        watchdog = build_watchdog(ffmpeg_error=ffmpeg_error)
+        watchdog.logpipe.tail.return_value = list(FFMPEG_EXIT_LINES)
+        watchdog.ffmpeg_detect_process = MagicMock()
+        watchdog.capture_thread = MagicMock()
+        watchdog.start_ffmpeg_detect = MagicMock()
+        return watchdog, ffmpeg_error
+
+    def _run_one_tick(self, watchdog: CameraWatchdog) -> None:
+        watchdog.start_all_ffmpeg = MagicMock()
+        watchdog.stop_event = MagicMock()
+        watchdog.stop_event.wait.side_effect = [False, True]
+        watchdog.segment_subscriber.check_for_update.return_value = (None, None)
+        watchdog.detection_frame = None
+
+        with patch("frigate.video.ffmpeg.time.sleep"):
+            watchdog._watch()
+
+    def test_crash_publishes_the_last_ffmpeg_lines(self):
+        watchdog, ffmpeg_error = self._build_watchdog()
+        watchdog.capture_thread.is_alive.return_value = False
+
+        self._run_one_tick(watchdog)
+
+        # published right away, the restart only happens after retry_interval
+        watchdog.start_ffmpeg_detect.assert_not_called()
+        assert ffmpeg_error.value == "\n".join(FFMPEG_EXIT_LINES)
+
+    def test_restart_publishes_before_the_log_pipe_is_emptied(self):
+        watchdog, ffmpeg_error = self._build_watchdog()
+        watchdog.capture_thread.is_alive.return_value = False
+
+        watchdog.reset_capture_thread(terminate=False)
+
+        assert ffmpeg_error.value == "\n".join(FFMPEG_EXIT_LINES)
+        tail_then_dump = [
+            name
+            for name, _, _ in watchdog.logpipe.mock_calls
+            if name in ("tail", "dump")
+        ]
+        assert tail_then_dump == ["tail", "dump"]
+
+    def test_restart_without_output_keeps_the_last_error(self):
+        watchdog, ffmpeg_error = self._build_watchdog()
+        watchdog.capture_thread.is_alive.return_value = False
+        ffmpeg_error.value = "Connection refused"
+        watchdog.logpipe.tail.return_value = []
+
+        watchdog.reset_capture_thread(terminate=False)
+
+        assert ffmpeg_error.value == "Connection refused"
+
+    def test_received_frames_clear_the_error(self):
+        watchdog, ffmpeg_error = self._build_watchdog()
+        ffmpeg_error.value = "Connection refused"
+        watchdog.capture_thread.is_alive.return_value = True
+        watchdog.capture_thread.current_frame.value = datetime.now().timestamp()
+        watchdog.camera_fps.value = 5
+
+        self._run_one_tick(watchdog)
+
+        assert ffmpeg_error.value == ""
+
+    def test_error_stays_until_a_frame_is_received(self):
+        watchdog, ffmpeg_error = self._build_watchdog()
+        ffmpeg_error.value = "Connection refused"
+        # a restarted ffmpeg that has not produced a frame or exited yet
+        watchdog.capture_thread.is_alive.return_value = True
+        watchdog.capture_thread.current_frame.value = datetime.now().timestamp()
+        watchdog.camera_fps.value = 0
+
+        self._run_one_tick(watchdog)
+
+        assert ffmpeg_error.value == "Connection refused"
+
+    def test_healthy_ticks_do_not_write_the_shared_value(self):
+        watchdog, _ = self._build_watchdog()
+        writes: list[str] = []
+
+        class CountingValue:
+            # the real value lives in the manager process, every access is IPC
+            @property
+            def value(self) -> str:
+                raise AssertionError("the shared value should not be read")
+
+            @value.setter
+            def value(self, new: str) -> None:
+                writes.append(new)
+
+        watchdog.ffmpeg_error = CountingValue()
+        watchdog.capture_thread.is_alive.return_value = True
+        watchdog.capture_thread.current_frame.value = datetime.now().timestamp()
+        watchdog.camera_fps.value = 5
+
+        for _ in range(3):
+            self._run_one_tick(watchdog)
+
+        # one write clears a value a crashed camera host may have left behind
+        assert writes == [""]
+
+    def test_stopping_ffmpeg_clears_the_error(self):
+        watchdog, ffmpeg_error = self._build_watchdog()
+        ffmpeg_error.value = "Connection refused"
+        watchdog.capture_thread.is_alive.return_value = False
+
+        with patch("frigate.video.ffmpeg.stop_ffmpeg"):
+            watchdog.stop_all_ffmpeg()
+
+        assert ffmpeg_error.value == ""
+
+    def test_watchdog_without_error_metric(self):
+        watchdog = build_watchdog()
+        watchdog.ffmpeg_detect_process = MagicMock()
+        watchdog.capture_thread = MagicMock()
+        watchdog.capture_thread.is_alive.return_value = False
+        watchdog.start_ffmpeg_detect = MagicMock()
+
+        watchdog.reset_capture_thread(terminate=False)
+
+        watchdog.start_ffmpeg_detect.assert_called_once()
+
+
+class TestLogPipeTail(unittest.TestCase):
+    def test_tail_returns_the_last_lines_without_consuming_them(self):
+        logpipe = LogPipe("ffmpeg.test.detect")
+        os.write(
+            logpipe.fileno(),
+            b"rtsp://admin:p@ss@10.0.0.1:554/video: 401 Unauthorized\n\nfirst\nsecond\n",
+        )
+        logpipe.close()
+        logpipe.join(5)
+
+        assert logpipe.tail(2) == ["first", "second"]
+        assert logpipe.tail(5) == [
+            "rtsp://*:*@10.0.0.1:554/video: 401 Unauthorized",
+            "first",
+            "second",
+        ]
+
+        with patch.object(logpipe.logger, "log") as log:
+            logpipe.dump()
+
+        # the lines are still there for dump()
+        assert log.call_args_list[-1] == call(logpipe.level, "second")

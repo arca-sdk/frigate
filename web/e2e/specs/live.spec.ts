@@ -306,3 +306,76 @@ test.describe("Live camera groups @medium", () => {
     await expect(group.locator("svg")).toBeVisible({ timeout: 10_000 });
   });
 });
+
+test.describe("Live offline camera @medium", () => {
+  const FFMPEG_ERROR = [
+    "[vist#0:0/hevc @ 0x55a7] [dec:hevc @ 0x55a7] No device available for decoder: device type vaapi needed for codec hevc.",
+    "Error opening output files: Generic error in an external library",
+  ].join("\n");
+
+  test("the offline overlay shows ffmpeg's error", async ({ frigateApp }) => {
+    await frigateApp.installDefaults({
+      stats: {
+        cameras: {
+          front_door: { camera_fps: 0, ffmpeg_error: FFMPEG_ERROR },
+        },
+      },
+    });
+    await frigateApp.goto("/#front_door");
+
+    await expect(frigateApp.page.getByText("Stream Offline")).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(frigateApp.page.getByText("Last ffmpeg error")).toBeVisible();
+    await expect(
+      frigateApp.page.locator("pre", { hasText: "No device available" }),
+    ).toHaveText(FFMPEG_ERROR);
+  });
+
+  test("the offline overlay has no error block without an error", async ({
+    frigateApp,
+  }) => {
+    await frigateApp.installDefaults({
+      stats: { cameras: { front_door: { camera_fps: 0 } } },
+    });
+    await frigateApp.goto("/#front_door");
+
+    await expect(frigateApp.page.getByText("Stream Offline")).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(frigateApp.page.getByText("Last ffmpeg error")).toHaveCount(0);
+  });
+
+  test("an online camera does not show a stale error", async ({
+    frigateApp,
+  }) => {
+    await frigateApp.installDefaults({
+      stats: { cameras: { front_door: { ffmpeg_error: FFMPEG_ERROR } } },
+    });
+    await frigateApp.goto("/#front_door");
+
+    await expect(frigateApp.page.locator("#player-container")).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(frigateApp.page.getByText("Stream Offline")).toHaveCount(0);
+    await expect(frigateApp.page.getByText("Last ffmpeg error")).toHaveCount(0);
+  });
+
+  test("the dashboard tile shows ffmpeg's error", async ({ frigateApp }) => {
+    await frigateApp.installDefaults({
+      stats: {
+        cameras: {
+          front_door: { camera_fps: 0, ffmpeg_error: FFMPEG_ERROR },
+        },
+      },
+    });
+    await frigateApp.goto("/");
+
+    const live = new LivePage(frigateApp.page, !frigateApp.isMobile);
+    const card = live.cameraCard("front_door").first();
+    await expect(card.getByText("Stream Offline")).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(card.locator("pre")).toContainText("No device available");
+  });
+});
