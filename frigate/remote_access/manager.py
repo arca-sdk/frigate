@@ -99,6 +99,7 @@ def configured_relay_url() -> str | None:
 
 
 def clean_name(raw: str | None) -> str:
+    """Strip unprintable characters from a server name and bound its length."""
     name = "".join(ch for ch in (raw or "") if ch.isprintable()).strip()
     return name[:MAX_NAME_LENGTH] or "Frigate"
 
@@ -178,6 +179,7 @@ class RemoteAccessManager(threading.Thread):
     def from_environment(
         cls, config_holder: ConfigHolder, stop_event: MpEvent
     ) -> "RemoteAccessManager":
+        """Build the manager with the binaries on PATH and the configured relay."""
         return cls(
             config_holder.config,
             stop_event,
@@ -191,6 +193,7 @@ class RemoteAccessManager(threading.Thread):
     @property
     def auth_enabled(self) -> bool:
         # off when either the config about to go live or the live one says so
+        """Whether Frigate's authentication is on, so Connect may run."""
         return self._auth_enabled and self._config_holder.config.auth.enabled
 
     def apply_config(self, config: FrigateConfig) -> None:
@@ -214,10 +217,12 @@ class RemoteAccessManager(threading.Thread):
 
     def start(self) -> None:
         # load the saved link before the API can ask about it
+        """Load the saved state and start the maintenance thread."""
         self.start_services()
         super().start()
 
     def run(self) -> None:
+        """Run maintenance every second until Frigate stops."""
         while not self._stop_event.wait(TICK):
             try:
                 self.run_once()
@@ -251,12 +256,14 @@ class RemoteAccessManager(threading.Thread):
             self._tailscale.start()
 
     def stop_services(self) -> None:
+        """Stop the connector and the Tailscale node."""
         self._stop_connector()
         # Serve's configuration lives in tailscaled's state, so stopping the
         # daemon keeps it for the next start
         self._tailscale.stop()
 
     def run_once(self) -> None:
+        """Do whatever maintenance is due: link polling, sync, checks, Tailscale."""
         now = self._clock()
         self._reconcile_connector()
         self._poll_link(now)
@@ -269,6 +276,7 @@ class RemoteAccessManager(threading.Thread):
     # Connect
 
     def start_link(self, name: str | None) -> dict[str, Any]:
+        """Ask the relay for a link code for this Frigate, named as given."""
         relay_url = self._require_connect()
         with self._lock:
             link = self._state.connect
@@ -305,11 +313,13 @@ class RemoteAccessManager(threading.Thread):
         return self.status()
 
     def cancel_link(self) -> dict[str, Any]:
+        """Stop waiting for a link code to be approved."""
         with self._lock:
             self._pending = None
         return self.status()
 
     def unlink(self) -> dict[str, Any]:
+        """Turn Connect off and remove this Frigate from its account."""
         with self._lock:
             link = self._state.connect
             if link is None:
@@ -632,6 +642,7 @@ class RemoteAccessManager(threading.Thread):
     # Tailscale
 
     def tailscale_enable(self) -> dict[str, Any]:
+        """Turn the Tailscale route on, signing in and serving Frigate as needed."""
         if not self._tailscale.available:
             raise RemoteAccessError(
                 "tailscale_missing", "Tailscale is not installed", 409
@@ -648,6 +659,7 @@ class RemoteAccessManager(threading.Thread):
         return self.status()
 
     def tailscale_disable(self) -> dict[str, Any]:
+        """Turn the Tailscale route off, keeping the node signed in."""
         with self._tailscale_op_lock:
             with self._lock:
                 self._persist(replace(self._state, tailscale_enabled=False))
@@ -659,6 +671,7 @@ class RemoteAccessManager(threading.Thread):
         return self.status()
 
     def tailscale_logout(self) -> dict[str, Any]:
+        """Sign the Tailscale node out of its tailnet and turn the route off."""
         if not self._tailscale.available:
             raise RemoteAccessError(
                 "tailscale_missing", "Tailscale is not installed", 409
@@ -757,6 +770,7 @@ class RemoteAccessManager(threading.Thread):
     # Status
 
     def status(self) -> dict[str, Any]:
+        """Both routes' state, as the settings page shows it."""
         return {
             "connect": self._connect_status(),
             "tailscale": self._tailscale_view(),

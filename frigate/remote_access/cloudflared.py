@@ -96,6 +96,7 @@ class CloudflaredConnector:
 
     @property
     def available(self) -> bool:
+        """Whether a cloudflared binary was found."""
         return self.binary is not None
 
     def run(self, token: str) -> None:
@@ -130,6 +131,7 @@ class CloudflaredConnector:
             self._thread.start()
 
     def stop(self) -> None:
+        """Stop the connector and its process, waiting for it to exit."""
         with self._lock:
             thread, stop, process = self._thread, self._stop, self._process
             self._thread = None
@@ -148,6 +150,7 @@ class CloudflaredConnector:
             self._error = None
 
     def status(self) -> ConnectorStatus:
+        """The connector's state, live connection count, and last error."""
         with self._lock:
             return ConnectorStatus(self._state, self._connections, self._error)
 

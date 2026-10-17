@@ -19,6 +19,7 @@ class LocalOrigin:
 
     @property
     def url(self) -> str:
+        """The origin as a URL, such as https://127.0.0.1:8971."""
         host = f"[{self.host}]" if ":" in self.host else self.host
         return f"{self.scheme}://{host}:{self.port}"
 
@@ -31,6 +32,7 @@ class LocalOrigin:
         return self.url
 
     def as_dict(self) -> dict[str, str | int]:
+        """The origin as the relay's API expects it."""
         return {"scheme": self.scheme, "host": self.host, "port": self.port}
 
 

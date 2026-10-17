@@ -30,6 +30,7 @@ class RelayError(Exception):
 
     @property
     def retryable(self) -> bool:
+        """Whether the same call may succeed later, such as after an outage."""
         return self.status is None or self.status == 429 or self.status >= 500
 
 
@@ -84,6 +85,7 @@ class RelayClient:
         self._session = session or requests.Session()
 
     def create_link_request(self, name: str, origin: LocalOrigin) -> LinkRequest:
+        """Ask for a code that links this Frigate to an account."""
         body = self._call(
             "POST",
             "/v1/link-requests",
@@ -116,11 +118,13 @@ class RelayClient:
         )
 
     def get_instance(self, secret: str) -> dict[str, Any]:
+        """Read this Frigate's link; raises a revoked RelayError once it is gone."""
         return self._call("GET", "/v1/instance", secret=secret)
 
     def sync_instance(
         self, secret: str, *, name: str, origin: LocalOrigin, include_token: bool
     ) -> SyncResult:
+        """Repair the tunnel, follow the origin, and maybe get a new token."""
         body = self._call(
             "POST",
             "/v1/instance/sync",
@@ -141,6 +145,7 @@ class RelayClient:
         )
 
     def unlink_instance(self, secret: str) -> None:
+        """Remove this Frigate from its account, with its tunnel and hostname."""
         self._call("DELETE", "/v1/instance", secret=secret)
 
     def _call(

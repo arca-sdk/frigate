@@ -48,9 +48,11 @@ class StateStore:
         self.path = os.path.join(directory, STATE_FILE)
 
     def ensure_directory(self) -> None:
+        """Create the state directory, readable only by Frigate's user."""
         os.makedirs(self.directory, mode=0o700, exist_ok=True)
 
     def load(self) -> RemoteAccessState:
+        """Read the saved state, or an empty one when it is missing or unreadable."""
         try:
             with open(self.path, encoding="utf-8") as file:
                 raw = json.load(file)
@@ -63,6 +65,7 @@ class StateStore:
         return self._parse(raw)
 
     def save(self, state: RemoteAccessState) -> None:
+        """Write the state atomically, readable only by Frigate's user."""
         self.ensure_directory()
         payload = {
             "version": STATE_VERSION,

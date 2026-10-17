@@ -47,6 +47,7 @@ class ServeAttempt:
 
 
 def parse_status(raw: str) -> TailscaleStatus | None:
+    """Read `tailscale status --json` output, or None when it is not status."""
     try:
         status = json.loads(raw)
     except ValueError:
@@ -119,12 +120,15 @@ class TailscaleNode:
 
     @property
     def available(self) -> bool:
+        """Whether both the tailscale and tailscaled binaries were found."""
         return self.tailscaled is not None and self.tailscale is not None
 
     def has_saved_identity(self) -> bool:
+        """Whether the node has signed in before and kept its state."""
         return os.path.exists(os.path.join(self.state_dir, "tailscaled.state"))
 
     def start(self) -> None:
+        """Start supervising tailscaled, unless it already runs."""
         with self._lock:
             if self._daemon_thread is not None and self._daemon_thread.is_alive():
                 return
@@ -142,6 +146,7 @@ class TailscaleNode:
             self._daemon_thread.start()
 
     def stop(self) -> None:
+        """Stop any Serve attempt and tailscaled, waiting for it to exit."""
         self._stop_serve_attempt()
         with self._lock:
             thread, stop, daemon = (
@@ -158,6 +163,7 @@ class TailscaleNode:
             thread.join(timeout=15)
 
     def is_started(self) -> bool:
+        """Whether tailscaled is being supervised."""
         with self._lock:
             return self._daemon_thread is not None and self._daemon_thread.is_alive()
 
@@ -182,6 +188,7 @@ class TailscaleNode:
         )
 
     def serve_target(self) -> str | None:
+        """What Serve proxies the HTTPS root to, if anything."""
         result = self._cli(["serve", "status", "--json"], timeout=5)
         if result is None or result.returncode != 0:
             return None
@@ -232,6 +239,7 @@ class TailscaleNode:
         ).start()
 
     def serve_attempt(self) -> ServeAttempt | None:
+        """The background Serve attempt's progress, if one ran."""
         with self._lock:
             if self._serve is None and self._serve_result is None:
                 return None
@@ -246,12 +254,14 @@ class TailscaleNode:
             )
 
     def clear_serve_attempt(self) -> None:
+        """Stop and forget the background Serve attempt."""
         self._stop_serve_attempt()
         with self._lock:
             self._serve_result = None
             self._serve_last_line = None
 
     def disable_serve(self) -> None:
+        """Stop serving on the HTTPS port."""
         self._stop_serve_attempt()
         self._cli(["serve", f"--https={SERVE_PORT}", "off"], timeout=CLI_TIMEOUT)
 
