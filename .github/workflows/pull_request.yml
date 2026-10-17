@@ -81,6 +81,8 @@ jobs:
   relay_test:
     name: Relay - Test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7
         with:
