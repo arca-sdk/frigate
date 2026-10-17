@@ -471,6 +471,24 @@ class TestConnectRequirements(ManagerTestCase):
         self.assertEqual(self.connector.state, ConnectorState.connected)
         self.assertEqual(self.connector.runs, ["token-2", "token-2"])
 
+    def test_stops_the_tunnel_before_a_config_without_authentication_goes_live(self):
+        holder = ConfigHolder(make_config())
+        manager = self.manager(holder.config, config_holder=holder)
+        self.link(manager)
+
+        # what swap_runtime_config does before installing the new config
+        manager.apply_config(make_config(auth={"enabled": False}))
+        self.assertEqual(self.connector.state, ConnectorState.stopped)
+
+        # a start that was already on its way does not bring it back
+        manager._run_connector(manager._generation, "token-2")
+        self.assertEqual(self.connector.state, ConnectorState.stopped)
+
+        manager.apply_config(make_config())
+        holder.set(make_config())
+        self.advance(manager, 1)
+        self.assertEqual(self.connector.state, ConnectorState.connected)
+
     def test_is_unavailable_without_a_relay_or_cloudflared(self):
         manager = self.manager(relay_url=None)
         self.assertEqual(
@@ -500,6 +518,18 @@ class TestConnectRequirements(ManagerTestCase):
             self.assertEqual(configured_relay_url(), "https://r.example")
         with patch.dict(os.environ, {"FRIGATE_REMOTE_ACCESS_RELAY_URL": ""}):
             self.assertIsNone(configured_relay_url())
+
+    def test_relay_url_must_use_https_except_on_this_machine(self):
+        for url, expected in (
+            ("http://relay.example.com", None),
+            ("ftp://relay.example.com", None),
+            ("https://", None),
+            ("http://127.0.0.1:8787", "http://127.0.0.1:8787"),
+            ("http://localhost:8787/", "http://localhost:8787"),
+            ("http://[::1]:8787", "http://[::1]:8787"),
+        ):
+            with patch.dict(os.environ, {"FRIGATE_REMOTE_ACCESS_RELAY_URL": url}):
+                self.assertEqual(configured_relay_url(), expected, url)
 
 
 class TestConnectMaintenance(ManagerTestCase):
@@ -601,6 +631,28 @@ class TestConnectMaintenance(ManagerTestCase):
         self.assertEqual(connect["state"], "unlinked")
         self.assertEqual(connect["error"]["code"], "unlink_incomplete")
 
+    def test_keeps_the_link_when_unlinking_cannot_be_saved(self):
+        manager = self.manager()
+        self.link(manager)
+        with patch.object(
+            manager._store, "save", side_effect=OSError(28, "No space left on device")
+        ):
+            with self.assertRaises(RemoteAccessError) as caught:
+                manager.unlink()
+
+        self.assertEqual(caught.exception.code, "state_not_saved")
+        self.assertEqual(manager.status()["connect"]["state"], "linked")
+        self.assertEqual(self.connector.state, ConnectorState.connected)
+        self.assertEqual(len(self.relay.instances), 1)
+
+    def test_reports_a_link_that_could_not_be_saved(self):
+        manager = self.manager()
+        with patch.object(manager._store, "save", side_effect=OSError(28, "No space")):
+            connect = self.link(manager)["connect"]
+
+        self.assertEqual(connect["state"], "linked")
+        self.assertEqual(connect["error"]["code"], "state_not_saved")
+
     def test_ignores_a_sync_that_finishes_after_unlinking(self):
         manager = self.restarted()
         original = self.relay.client
@@ -696,6 +748,40 @@ class TestTailscale(ManagerTestCase):
         tailscale = manager.tailscale_logout()["tailscale"]
         self.assertTrue(self.tailscale.logged_out)
         self.assertEqual(tailscale["state"], "off")
+
+    def test_turning_off_wins_over_a_maintenance_pass_in_progress(self):
+        manager = self.manager()
+        manager.tailscale_enable()
+        self.tailscale.started = False
+        turned_off = threading.Thread(target=manager.tailscale_disable)
+        # the admin turns it off while maintenance is about to start the node
+        self.tailscale.on_is_started = turned_off.start
+        self.advance(manager, 5)
+        turned_off.join(timeout=10)
+
+        self.assertFalse(self.tailscale.started)
+        self.assertEqual(manager.status()["tailscale"]["state"], "off")
+
+    def test_reports_a_setting_that_could_not_be_saved(self):
+        manager = self.manager()
+        with patch.object(manager._store, "save", side_effect=OSError(28, "No space")):
+            with self.assertRaises(RemoteAccessError) as caught:
+                manager.tailscale_enable()
+
+        self.assertEqual(caught.exception.code, "state_not_saved")
+        self.assertFalse(self.tailscale.started)
+        self.assertFalse(manager.status()["tailscale"]["enabled"])
+
+    def test_stays_on_when_sign_out_fails(self):
+        manager = self.manager()
+        manager.tailscale_enable()
+        self.tailscale.logout_succeeds = False
+        with self.assertRaises(RemoteAccessError) as caught:
+            manager.tailscale_logout()
+
+        self.assertEqual(caught.exception.code, "tailscale_logout_failed")
+        self.assertTrue(manager.status()["tailscale"]["enabled"])
+        self.assertTrue(self.tailscale.started)
 
     def test_is_unavailable_without_the_binaries(self):
         manager = self.manager(tailscale_node=FakeTailscale(available=False))

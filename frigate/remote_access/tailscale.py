@@ -255,8 +255,10 @@ class TailscaleNode:
         self._stop_serve_attempt()
         self._cli(["serve", f"--https={SERVE_PORT}", "off"], timeout=CLI_TIMEOUT)
 
-    def logout(self) -> None:
-        self._cli(["logout"], timeout=15)
+    def logout(self) -> bool:
+        """Sign the node out of its tailnet. False when that did not happen."""
+        result = self._cli(["logout"], timeout=15)
+        return result is not None and result.returncode == 0
 
     def _stop_serve_attempt(self) -> None:
         with self._lock:

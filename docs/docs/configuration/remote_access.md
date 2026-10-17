@@ -75,7 +75,7 @@ To reach Frigate over WebRTC through Tailscale, add Frigate's Tailscale address 
 
 | What you see                                                     | What to do                                                                                                                                 |
 | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| "This Frigate has no remote access service configured."           | This build has no remote access service. Set `FRIGATE_REMOTE_ACCESS_RELAY_URL` to the service's URL, or use Tailscale.                       |
+| "This Frigate has no remote access service configured."           | This build has no remote access service. Set `FRIGATE_REMOTE_ACCESS_RELAY_URL` to the service's `https` URL, or use Tailscale.                       |
 | "Could not reach the remote access service"                       | Check that Frigate's host can reach the internet, then try again.                                                                          |
 | Connect shows **Not connected** with an error from Cloudflare      | Outbound connections to Cloudflare on port 7844 (UDP and TCP) may be blocked by a firewall. Frigate keeps retrying and requests a new tunnel if Cloudflare rejects the old one. |
 | "This Frigate was removed from its remote access account"          | It was removed from the account page. Select **Set up again** to link it, or **Forget** to clear it.                                        |

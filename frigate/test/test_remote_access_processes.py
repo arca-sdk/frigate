@@ -388,8 +388,12 @@ class TestTailscaleNode(unittest.TestCase):
         self.node.start()
         wait_for(lambda: self.node.status() is not None)
         self.update(backend="Running")
-        self.node.logout()
+        self.assertTrue(self.node.logout())
         self.assertEqual(self.node.status().backend_state, "NeedsLogin")
+
+        self.node.stop()
+        wait_for(lambda: not os.path.exists(self.state + ".daemon"))
+        self.assertFalse(self.node.logout())
 
     def test_is_unavailable_without_both_binaries(self):
         node = TailscaleNode(None, "tailscale", self.directory, self.directory)

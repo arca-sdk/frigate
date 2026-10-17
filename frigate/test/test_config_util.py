@@ -68,8 +68,24 @@ class TestSwapRuntimeConfig(unittest.TestCase):
 
         self.assertIs(factory(), config)
 
+    def test_remote_access_sees_the_config_before_it_goes_live(self) -> None:
+        """Remote access must stop its tunnel before a config turning auth
+        off reaches /auth, which reads the live config on every request."""
+        app = self._make_app()
+        old_config = app.frigate_config
+        config = MagicMock(name="new_config")
+        seen = []
+        app.remote_access.apply_config.side_effect = lambda new: seen.append(
+            (new, app.frigate_config)
+        )
+
+        swap_runtime_config(app, config)
+
+        self.assertEqual(seen, [(config, old_config)])
+
     def test_tolerates_missing_optional_collaborators(self) -> None:
         app = MagicMock()
+        app.remote_access = None
         app.profile_manager = None
         app.stats_emitter = None
         app.dispatcher = None

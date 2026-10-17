@@ -15,8 +15,9 @@ import os
 import shutil
 import threading
 import time
+import urllib.parse
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from multiprocessing.synchronize import Event as MpEvent
 from typing import Any
 
@@ -76,9 +77,25 @@ class PendingLink:
 
 
 def configured_relay_url() -> str | None:
-    """The relay this build links to, unless the environment names another."""
+    """The relay this build links to, unless the environment names another.
+
+    Only https, because calls carry the instance secret and answers carry the
+    tunnel token. Plain http is allowed for a relay on this machine, which is
+    how one runs under `wrangler dev`.
+    """
     value = os.environ.get(REMOTE_ACCESS_RELAY_URL_ENV_VAR, REMOTE_ACCESS_RELAY_URL)
-    return value.strip().rstrip("/") or None
+    url = value.strip().rstrip("/")
+    if not url:
+        return None
+
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme == "https" and parsed.hostname:
+        return url
+    if parsed.scheme == "http" and parsed.hostname in ("127.0.0.1", "localhost", "::1"):
+        return url
+
+    logger.error("Ignoring the remote access relay URL %s; it must use https", url)
+    return None
 
 
 def clean_name(raw: str | None) -> str:
@@ -114,6 +131,8 @@ class RemoteAccessManager(threading.Thread):
         # auth.enabled is read per request from the live config, which a save
         # can swap without a restart, so it is followed through the holder
         self._config_holder = config_holder or ConfigHolder(config)
+        # set by apply_config before a new config goes live
+        self._auth_enabled = config.auth.enabled
         # the login limiter is configured once, when the API starts
         self.login_rate_limited = config.auth.failed_login_rate_limit is not None
         self._relay_client = relay_client
@@ -145,6 +164,9 @@ class RemoteAccessManager(threading.Thread):
             runtime_dir=os.path.join(runtime_dir, "tailscale"),
         )
         self._tailscale_lock = threading.Lock()
+        # one Tailscale change at a time, maintenance included, so turning it
+        # off cannot race a maintenance pass that is about to start it
+        self._tailscale_op_lock = threading.RLock()
         self._tailscale_status: TailscaleStatus | None = None
         self._tailscale_serve_target: str | None = None
         self._tailscale_checked = float("-inf")
@@ -168,7 +190,25 @@ class RemoteAccessManager(threading.Thread):
 
     @property
     def auth_enabled(self) -> bool:
-        return self._config_holder.config.auth.enabled
+        # off when either the config about to go live or the live one says so
+        return self._auth_enabled and self._config_holder.config.auth.enabled
+
+    def apply_config(self, config: FrigateConfig) -> None:
+        """Take a config that is about to replace the live one.
+
+        Called before the swap: /auth reads the live config on every request,
+        so when the new one turns authentication off, the tunnel must already
+        be down by the time it takes effect.
+        """
+        with self._connector_lock:
+            with self._lock:
+                self._auth_enabled = config.auth.enabled
+            if not config.auth.enabled:
+                if self._connector.status().state != ConnectorState.stopped:
+                    logger.warning(
+                        "Authentication was turned off, so remote access is off until it is back on"
+                    )
+                self._connector.stop()
 
     # Lifecycle
 
@@ -276,8 +316,9 @@ class RemoteAccessManager(threading.Thread):
                 raise RemoteAccessError(
                     "not_linked", "Remote access is not set up", 409
                 )
-            self._state.connect = None
-            self._save()
+            # saved first, so a failed write cannot leave a link that comes
+            # back after a restart while the relay has already dropped it
+            self._persist(replace(self._state, connect=None))
             self._generation += 1
             self._pending = None
             self._sync_due = None
@@ -409,10 +450,18 @@ class RemoteAccessManager(threading.Thread):
             if not cancelled:
                 self._pending = None
                 self._state.connect = link
-                self._save()
+                saved = self._save()
                 self._generation += 1
                 generation = self._generation
-                self._connect_error = None
+                self._connect_error = (
+                    None
+                    if saved
+                    else (
+                        "state_not_saved",
+                        "Remote access is on, but its settings could not be saved, so "
+                        "it stops when Frigate restarts. Check that /config is writable.",
+                    )
+                )
                 self._relay_error = None
                 self._sync_due = None
                 self._check_due = now + CHECK_INTERVAL
@@ -546,8 +595,11 @@ class RemoteAccessManager(threading.Thread):
     def _run_connector(self, generation: int, token: str) -> None:
         with self._connector_lock:
             with self._lock:
-                # unlinked or replaced while this caller was busy
-                if generation != self._generation:
+                # unlinked, replaced, or auth turned off while this caller was busy
+                if (
+                    generation != self._generation
+                    or self._connect_blocked_reason() is not None
+                ):
                     return
             self._connector.run(token)
 
@@ -555,11 +607,27 @@ class RemoteAccessManager(threading.Thread):
         with self._connector_lock:
             self._connector.stop()
 
-    def _save(self) -> None:
+    def _save(self) -> bool:
+        """Save from background work, which has nobody to report to."""
         try:
             self._store.save(self._state)
         except OSError as err:
             logger.error("Could not save remote access state: %s", err)
+            return False
+        return True
+
+    def _persist(self, state: RemoteAccessState) -> None:
+        """Save a change an admin asked for, and only then make it current."""
+        try:
+            self._store.save(state)
+        except OSError as err:
+            logger.error("Could not save remote access state: %s", err)
+            raise RemoteAccessError(
+                "state_not_saved",
+                "Could not save the remote access settings. Check that /config is writable.",
+                500,
+            ) from err
+        self._state = state
 
     # Tailscale
 
@@ -568,26 +636,26 @@ class RemoteAccessManager(threading.Thread):
             raise RemoteAccessError(
                 "tailscale_missing", "Tailscale is not installed", 409
             )
-        with self._lock:
-            self._state.tailscale_enabled = True
-            self._save()
-        self._tailscale.start()
-        self._wait_for_tailscale()
-        with self._tailscale_lock:
-            self._last_login = float("-inf")
-            self._last_serve = float("-inf")
-        self._reconcile_tailscale(self._clock())
+        with self._tailscale_op_lock:
+            with self._lock:
+                self._persist(replace(self._state, tailscale_enabled=True))
+            self._tailscale.start()
+            self._wait_for_tailscale()
+            with self._tailscale_lock:
+                self._last_login = float("-inf")
+                self._last_serve = float("-inf")
+            self._reconcile_tailscale(self._clock())
         return self.status()
 
     def tailscale_disable(self) -> dict[str, Any]:
-        with self._lock:
-            self._state.tailscale_enabled = False
-            self._save()
-        if self._tailscale.is_started():
-            self._tailscale.disable_serve()
-        self._tailscale.clear_serve_attempt()
-        self._tailscale.stop()
-        self._forget_tailscale_status()
+        with self._tailscale_op_lock:
+            with self._lock:
+                self._persist(replace(self._state, tailscale_enabled=False))
+            if self._tailscale.is_started():
+                self._tailscale.disable_serve()
+            self._tailscale.clear_serve_attempt()
+            self._tailscale.stop()
+            self._forget_tailscale_status()
         return self.status()
 
     def tailscale_logout(self) -> dict[str, Any]:
@@ -595,11 +663,18 @@ class RemoteAccessManager(threading.Thread):
             raise RemoteAccessError(
                 "tailscale_missing", "Tailscale is not installed", 409
             )
-        self._tailscale.start()
-        self._wait_for_tailscale()
-        self._tailscale.disable_serve()
-        self._tailscale.logout()
-        return self.tailscale_disable()
+        with self._tailscale_op_lock:
+            self._tailscale.start()
+            self._wait_for_tailscale()
+            self._tailscale.disable_serve()
+            if not self._tailscale.logout():
+                # still signed in, so turning it off would hide that it is
+                raise RemoteAccessError(
+                    "tailscale_logout_failed",
+                    "Could not sign out of Tailscale. Try again.",
+                    502,
+                )
+            return self.tailscale_disable()
 
     def _wait_for_tailscale(self) -> None:
         deadline = time.monotonic() + DAEMON_START_WAIT
@@ -628,6 +703,10 @@ class RemoteAccessManager(threading.Thread):
         return status
 
     def _reconcile_tailscale(self, now: float) -> None:
+        with self._tailscale_op_lock:
+            self._reconcile_tailscale_locked(now)
+
+    def _reconcile_tailscale_locked(self, now: float) -> None:
         with self._lock:
             enabled = self._state.tailscale_enabled
         if not enabled or not self._tailscale.available:

@@ -39,6 +39,11 @@ def swap_runtime_config(app: FastAPI, config: FrigateConfig) -> None:
     re-layered last: the swap rebuilt every camera from yaml, so without this a
     camera the user turned off would silently come back on.
     """
+    # before /auth can see the new config, so a save that turns auth off
+    # never leaves the remote access tunnel serving Frigate without a login
+    if app.remote_access is not None:
+        app.remote_access.apply_config(config)
+
     app.frigate_config = config
 
     if app.config_holder is not None:

@@ -1,6 +1,7 @@
 """Stand-ins for the relay, the connector and the Tailscale node."""
 
 import itertools
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -203,6 +204,9 @@ class FakeTailscale:
         self.logins = 0
         self.serve_starts: list[str] = []
         self.logged_out = False
+        self.logout_succeeds = True
+        # runs inside the next is_started call, to interleave another request
+        self.on_is_started: Callable[[], None] | None = None
 
     def start(self) -> None:
         self.started = True
@@ -211,6 +215,9 @@ class FakeTailscale:
         self.started = False
 
     def is_started(self) -> bool:
+        hook, self.on_is_started = self.on_is_started, None
+        if hook is not None:
+            hook()
         return self.started
 
     def status(self) -> TailscaleStatus | None:
@@ -256,6 +263,9 @@ class FakeTailscale:
         self.target = None
         self.attempt = None
 
-    def logout(self) -> None:
+    def logout(self) -> bool:
+        if not self.logout_succeeds:
+            return False
         self.logged_out = True
         self.backend_state = "NeedsLogin"
+        return True
