@@ -783,6 +783,15 @@ class TestTailscale(ManagerTestCase):
         self.assertTrue(manager.status()["tailscale"]["enabled"])
         self.assertTrue(self.tailscale.started)
 
+    def test_a_failed_sign_out_while_off_leaves_it_off(self):
+        manager = self.manager()
+        self.tailscale.logout_succeeds = False
+        with self.assertRaises(RemoteAccessError):
+            manager.tailscale_logout()
+
+        self.assertFalse(self.tailscale.started)
+        self.assertEqual(manager.status()["tailscale"]["state"], "off")
+
     def test_is_unavailable_without_the_binaries(self):
         manager = self.manager(tailscale_node=FakeTailscale(available=False))
         self.assertFalse(manager.status()["tailscale"]["available"])

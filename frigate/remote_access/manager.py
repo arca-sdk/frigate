@@ -664,10 +664,16 @@ class RemoteAccessManager(threading.Thread):
                 "tailscale_missing", "Tailscale is not installed", 409
             )
         with self._tailscale_op_lock:
+            with self._lock:
+                was_enabled = self._state.tailscale_enabled
             self._tailscale.start()
             self._wait_for_tailscale()
             self._tailscale.disable_serve()
             if not self._tailscale.logout():
+                if not was_enabled:
+                    # started only to sign out; nothing would stop it later
+                    self._tailscale.stop()
+                    self._forget_tailscale_status()
                 # still signed in, so turning it off would hide that it is
                 raise RemoteAccessError(
                     "tailscale_logout_failed",
