@@ -28,6 +28,7 @@ from frigate.api import (
     notification,
     preview,
     record,
+    remote_access,
     review,
 )
 from frigate.api.auth import get_jwt_secret, limiter, require_admin_by_default
@@ -44,6 +45,7 @@ from frigate.embeddings import EmbeddingsContext
 from frigate.genai import GenAIClientManager
 from frigate.notices.registry import NoticeRegistry
 from frigate.ptz.onvif import OnvifController
+from frigate.remote_access import RemoteAccessManager
 from frigate.stats.emitter import StatsEmitter
 from frigate.storage import StorageMaintainer
 
@@ -80,6 +82,7 @@ def create_fastapi_app(
     enforce_default_admin: bool = True,
     config_holder: ConfigHolder | None = None,
     notice_registry: NoticeRegistry | None = None,
+    remote_access_manager: RemoteAccessManager | None = None,
 ):
     logger.info("Starting FastAPI app")
     app = FastAPI(
@@ -151,6 +154,8 @@ def create_fastapi_app(
     app.include_router(export.router)
     app.include_router(hardware.router)
     app.include_router(notices.router)
+    # before media, whose /{camera_name} would otherwise claim /remote_access
+    app.include_router(remote_access.router)
     app.include_router(event.router)
     app.include_router(media.router)
     app.include_router(motion_search.router)
@@ -174,6 +179,7 @@ def create_fastapi_app(
     app.dispatcher = dispatcher
     app.profile_manager = profile_manager
     app.config_holder = config_holder
+    app.remote_access = remote_access_manager
 
     if frigate_config.auth.enabled:
         secret = get_jwt_secret()

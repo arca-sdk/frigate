@@ -17,4 +17,5 @@ class Tags(Enum):
     notifications = "Notifications"
     preview = "Preview"
     recordings = "Recordings"
+    remote_access = "Remote Access"
     review = "Review"

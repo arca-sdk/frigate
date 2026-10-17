@@ -1,0 +1,59 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "remote-access-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  // The account and link pages. Requests under /v1/ go to the Worker.
+  "assets": {
+    "directory": "./public",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "none",
+    "run_worker_first": ["/v1/*"]
+  },
+  // Run `wrangler d1 create remote-access-relay` and paste the id it prints.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "remote-access-relay",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  // Expires link requests and retries teardowns that failed part way.
+  "triggers": { "crons": ["*/15 * * * *"] },
+  "ratelimits": [
+    // New link requests, per client address
+    {
+      "name": "LINK_RATE_LIMITER",
+      "namespace_id": "1001",
+      "simple": { "limit": 10, "period": 60 }
+    },
+    // Looking up and deciding codes, per account, so codes cannot be guessed
+    {
+      "name": "CODE_RATE_LIMITER",
+      "namespace_id": "1002",
+      "simple": { "limit": 20, "period": 60 }
+    }
+  ],
+  "vars": {
+    // Shown on the relay's pages and in Frigate's remote access settings.
+    "SERVICE_NAME": "Remote access",
+    // Leave empty to use the origin each request arrives on.
+    "PUBLIC_URL": "",
+    // Instances get a hostname one label below this zone, such as
+    // k3m9x2p4q7r8s5t6.example-tunnels.net, which Universal SSL covers.
+    "TUNNEL_ZONE_NAME": "",
+    "CLOUDFLARE_ACCOUNT_ID": "",
+    "CLOUDFLARE_ZONE_ID": "",
+    "CLERK_PUBLISHABLE_KEY": "",
+    // Tunnels are named <prefix>-<instance id>, so one Cloudflare account can
+    // hold several relay deployments.
+    "TUNNEL_NAME_PREFIX": "relay",
+    "MAX_INSTANCES_PER_USER": "5"
+  }
+  // Secrets, set with `wrangler secret put`:
+  //   CLOUDFLARE_API_TOKEN  Account: Cloudflare Tunnel Edit, Zone: DNS Edit
+  //   CLERK_SECRET_KEY
+}
