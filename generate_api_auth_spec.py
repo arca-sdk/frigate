@@ -63,6 +63,7 @@ from frigate.api import (
     notification,
     preview,
     record,
+    remote_access,
     review,
 )
 from frigate.api.auth import require_admin_by_default
@@ -149,6 +150,7 @@ ROUTERS = [
     export.router,
     hardware.router,
     notices.router,
+    remote_access.router,
     event.router,
     media.router,
     motion_search.router,

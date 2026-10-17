@@ -82,6 +82,7 @@ from frigate.ptz.onvif import OnvifController
 from frigate.record.cleanup import RecordingCleanup
 from frigate.record.export import migrate_exports
 from frigate.record.record import RecordProcess
+from frigate.remote_access import RemoteAccessManager
 from frigate.review.review import ReviewProcess
 from frigate.stats.emitter import StatsEmitter
 from frigate.stats.util import stats_init
@@ -526,6 +527,12 @@ class FrigateApp:
         )
         self.stats_emitter.start()
 
+    def start_remote_access(self) -> None:
+        self.remote_access = RemoteAccessManager.from_environment(
+            self.config_holder, self.stop_event
+        )
+        self.remote_access.start()
+
     def start_watchdog(self) -> None:
         self.frigate_watchdog = FrigateWatchdog(self.detectors, self.stop_event)
 
@@ -690,6 +697,7 @@ class FrigateApp:
         self.start_event_cleanup()
         self.start_record_cleanup()
         self.start_watchdog()
+        self.start_remote_access()
 
         # publish for the recording/review/embeddings processes, which start
         # before the config can be corrected, and for the retained MQTT states
@@ -715,6 +723,7 @@ class FrigateApp:
                     self.profile_manager,
                     config_holder=self.config_holder,
                     notice_registry=self.notice_registry,
+                    remote_access_manager=self.remote_access,
                 ),
                 host="127.0.0.1",
                 port=5001,
@@ -785,6 +794,7 @@ class FrigateApp:
         self.record_cleanup.join()
         self.stats_emitter.join()
         self.frigate_watchdog.join()
+        self.remote_access.join()
         self.camera_maintainer.join()
         self.db.stop()
 
