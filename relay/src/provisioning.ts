@@ -75,7 +75,8 @@ export class Provisioner {
    */
   async withLease<T>(instanceId: string, work: (instance: InstanceRow) => Promise<T>): Promise<T> {
     if (!(await this.store.claimInstance(instanceId, this.now(), INSTANCE_LEASE_MS))) {
-      throw new InstanceBusyError();
+      // The claim also fails when there is no row left to claim.
+      throw (await this.store.getInstance(instanceId)) === null ? new InstanceGoneError() : new InstanceBusyError();
     }
     try {
       const instance = await this.store.getInstance(instanceId);

@@ -234,6 +234,17 @@ describe("linking", () => {
     expect(h.cloudflare.liveTunnels()).toHaveLength(1);
   });
 
+  it("tells a Frigate polling again that its instance was removed meanwhile", async () => {
+    const h = harness();
+    const link = await startLink(h);
+    await call(h, "POST", `/v1/link-requests/${link.user_code}/approve`, { auth: "user:alice" });
+    // The first response never reached the Frigate, and the owner removed it.
+    const first = await poll(h, link.device_code);
+    await call(h, "DELETE", `/v1/me/instances/${first.body.instance_id}`, { auth: "user:alice" });
+
+    expect((await poll(h, link.device_code)).body.error).toBe("access_denied");
+  });
+
   it("answers a concurrent poll with slow_down while one is provisioning", async () => {
     const h = harness();
     const link = await startLink(h);
