@@ -14,6 +14,7 @@
     "frigatePlus": "Frigate+ Settings - Frigate",
     "detectorsAndModel": "Detectors and model - Frigate",
     "notifications": "Notification Settings - Frigate",
+    "remoteAccess": "Remote Access - Frigate",
     "maintenance": "Maintenance - Frigate",
     "profiles": "Profiles - Frigate"
   },
@@ -114,6 +115,7 @@
     "users": "Users",
     "roles": "Roles",
     "notifications": "Notifications",
+    "remoteAccess": "Remote access",
     "triggers": "Triggers",
     "debug": "Debug",
     "frigateplus": "Frigate+",
@@ -1322,6 +1324,81 @@
     "toast": {
       "success": "Frigate+ settings have been saved. Restart Frigate to apply changes.",
       "error": "Failed to save config changes: {{errorMessage}}"
+    }
+  },
+  "remoteAccess": {
+    "title": "Remote Access",
+    "description": "Reach Frigate from outside your network without forwarding ports on your router. Both options lead to Frigate's login page, so everyone still signs in.",
+    "copyAddress": "Copy address",
+    "toast": {
+      "copied": "Address copied",
+      "error": "Remote access could not be changed"
+    },
+    "security": {
+      "authDisabled": {
+        "title": "Authentication is turned off",
+        "desc": "Connect stays unavailable until authentication is turned on, because anyone with the address would get in without signing in. Tailscale is limited to your tailnet but would let everyone on it in too."
+      },
+      "rateLimit": {
+        "title": "Failed login rate limiting is off",
+        "desc": "Set a failed login rate limit in Authentication settings before sharing Frigate outside your network, so passwords cannot be guessed quickly. Add 127.0.0.1/32 to trusted proxies so the limit applies per visitor rather than to all remote visitors together."
+      }
+    },
+    "connect": {
+      "title": "Connect",
+      "label": "Web address",
+      "desc": "Gives Frigate a private https address that works from any browser. Sign in to the remote access service once to link it; nothing on your router changes.",
+      "nameLabel": "Name for this Frigate",
+      "nameDesc": "Shown in your remote access account to tell your Frigate servers apart.",
+      "setUp": "Set up",
+      "setUpAgain": "Set up again",
+      "forget": "Forget",
+      "unavailable": {
+        "notConfigured": "This Frigate has no remote access service configured.",
+        "connectorMissing": "This installation does not include cloudflared, which Connect needs."
+      },
+      "linking": {
+        "instructions": "Open the sign-in page, sign in, and check that it shows this code:",
+        "open": "Open sign-in page",
+        "waiting": "Waiting for approval. The code expires in {{time}}."
+      },
+      "status": {
+        "connected": "Connected",
+        "starting": "Connecting",
+        "offline": "Not connected",
+        "blocked": "Off while authentication is turned off"
+      },
+      "linked": {
+        "account": "Linked as {{name}} to {{account}}",
+        "noAccount": "Linked as {{name}}",
+        "manage": "Manage account",
+        "turnOff": "Turn off"
+      },
+      "revoked": "This Frigate was removed from its remote access account, so {{hostname}} no longer works.",
+      "confirmOff": {
+        "title": "Turn off Connect?",
+        "desc": "{{hostname}} stops working and this Frigate is removed from your remote access account. You can set it up again later, but it gets a new address."
+      }
+    },
+    "tailscale": {
+      "title": "Tailscale",
+      "label": "Tailnet address",
+      "desc": "Adds Frigate to your tailnet as its own device and shares it over https with Tailscale Serve. Only devices on your tailnet can reach it.",
+      "unavailable": "This installation does not include Tailscale.",
+      "turnOn": "Turn on",
+      "turnOff": "Turn off",
+      "signIn": "Sign in to Tailscale",
+      "signInDesc": "Sign in with the Tailscale account that owns your tailnet to add Frigate to it.",
+      "preparingSignIn": "Preparing the sign-in link",
+      "needsApproval": "Waiting for an admin of your tailnet to approve this device.",
+      "starting": "Starting Tailscale",
+      "enablingServe": "Setting up https",
+      "needsHttps": "Your tailnet needs https certificates turned on first.",
+      "enableHttps": "Turn on https",
+      "serveError": "Could not share Frigate on the tailnet: {{error}}. Retrying shortly.",
+      "serving": "Shared on your tailnet",
+      "servingOn": "Shared on {{tailnet}}",
+      "signOut": "Sign out of Tailscale"
     }
   },
   "triggers": {
