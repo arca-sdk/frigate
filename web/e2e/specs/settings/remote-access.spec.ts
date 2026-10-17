@@ -70,8 +70,16 @@ function linked(status: Status): Status {
   };
 }
 
+/** The settings page loads raw config paths, which no default mock answers. */
+async function installRawPaths(page: Page) {
+  await page.route("**/api/config/raw_paths", (route) =>
+    route.fulfill({ json: { cameras: {} } }),
+  );
+}
+
 /** A stateful stand-in for the backend's remote access routes. */
 async function installRemoteAccess(page: Page, initial: Status) {
+  await installRawPaths(page);
   let status = initial;
   const requests: string[] = [];
   await page.route("**/api/remote_access**", async (route) => {
@@ -223,5 +231,33 @@ test.describe("Remote access settings @medium", () => {
       timeout: 10_000,
     });
     await expect(page.getByText("Shared on example.com")).toBeVisible();
+  });
+});
+
+test.describe("Remote access settings when the status fails @medium", () => {
+  // The failed status request is the point of this test.
+  test.use({ expectedErrors: [/remote_access|status of 500/] });
+
+  test("shows an error with a retry instead of loading forever", async ({
+    frigateApp,
+  }) => {
+    let fail = true;
+    await installRawPaths(frigateApp.page);
+    await frigateApp.page.route("**/api/remote_access", async (route) => {
+      if (fail) {
+        await route.fulfill({ status: 500, json: { success: false } });
+      } else {
+        await route.fulfill({ json: baseStatus() });
+      }
+    });
+    await frigateApp.goto("/settings?page=remoteAccess");
+    const page = frigateApp.page;
+
+    await expect(
+      page.getByText("Could not load the remote access status."),
+    ).toBeVisible({ timeout: 10_000 });
+    fail = false;
+    await page.getByRole("button", { name: "Retry" }).click();
+    await expect(page.getByRole("button", { name: "Set up" })).toBeVisible();
   });
 });

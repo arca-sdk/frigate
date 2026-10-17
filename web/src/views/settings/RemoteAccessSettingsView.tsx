@@ -56,7 +56,12 @@ function needsFastRefresh(status: RemoteAccessStatus | undefined): boolean {
 export default function RemoteAccessSettingsView(_props: SettingsPageProps) {
   const { t } = useTranslation("views/settings");
   const { getLocaleDocUrl } = useDocDomain();
-  const { data: status, mutate } = useSWR<RemoteAccessStatus>("remote_access", {
+  const {
+    data: status,
+    error: loadError,
+    isValidating,
+    mutate,
+  } = useSWR<RemoteAccessStatus>("remote_access", {
     refreshInterval: (latest) => (needsFastRefresh(latest) ? 2000 : 10000),
   });
   const [busy, setBusy] = useState(false);
@@ -86,6 +91,24 @@ export default function RemoteAccessSettingsView(_props: SettingsPageProps) {
     },
     [mutate, t],
   );
+
+  if (!status && loadError) {
+    return (
+      <div className="flex size-full flex-col items-start gap-3 pt-2">
+        <p className="text-sm text-danger" role="alert">
+          {t("remoteAccess.loadError")}
+        </p>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={isValidating}
+          onClick={() => mutate()}
+        >
+          {t("button.retry", { ns: "common" })}
+        </Button>
+      </div>
+    );
+  }
 
   if (!status) {
     return <ActivityIndicator />;
@@ -433,6 +456,7 @@ function ConnectCard({
             </AlertDialogCancel>
             <AlertDialogAction
               className="bg-destructive text-white hover:bg-destructive/90"
+              disabled={busy}
               onClick={() => act("delete", "remote_access/connect")}
             >
               {t("remoteAccess.connect.linked.turnOff")}

@@ -1330,6 +1330,7 @@
     "title": "Remote Access",
     "description": "Reach Frigate from outside your network without forwarding ports on your router. Both options lead to Frigate's login page, so everyone still signs in.",
     "copyAddress": "Copy address",
+    "loadError": "Could not load the remote access status.",
     "toast": {
       "copied": "Address copied",
       "error": "Remote access could not be changed"
