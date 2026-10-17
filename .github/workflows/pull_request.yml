@@ -78,6 +78,25 @@ jobs:
             web/playwright-report/
           retention-days: 7
 
+  relay_test:
+    name: Relay - Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.x
+      - run: npm ci
+        working-directory: ./relay
+      - name: Type check
+        run: npm run typecheck
+        working-directory: ./relay
+      - name: Test
+        run: npm test
+        working-directory: ./relay
+
   python_checks:
     runs-on: ubuntu-latest
     name: Python Checks
