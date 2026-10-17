@@ -25,6 +25,8 @@ export class FakeCloudflare implements CloudflareApi {
   readonly tunnels = new Map<string, FakeTunnel>();
   readonly records = new Map<string, DnsRecord>();
   readonly calls: Operation[] = [];
+  /** Runs inside the next createTunnel call, to interleave another request. */
+  onCreateTunnel: (() => Promise<void>) | null = null;
   private readonly failures = new Map<Operation, Error>();
   private sequence = 0;
 
@@ -52,6 +54,9 @@ export class FakeCloudflare implements CloudflareApi {
 
   async createTunnel(name: string): Promise<Tunnel> {
     this.enter("createTunnel");
+    const hook = this.onCreateTunnel;
+    this.onCreateTunnel = null;
+    await hook?.();
     if (this.liveTunnels().some((tunnel) => tunnel.name === name)) {
       throw new CloudflareApiError("create-tunnel", 409, [1013], "You already have a tunnel with this name");
     }

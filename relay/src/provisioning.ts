@@ -17,6 +17,23 @@ import {
 import { type Origin, originService } from "./origin.ts";
 import type { InstanceRow, Store } from "./store.ts";
 
+/** Another request is creating or removing this instance's resources. */
+export class InstanceBusyError extends Error {
+  constructor() {
+    super("instance is busy");
+  }
+}
+
+/** The instance was removed, or is being removed. */
+export class InstanceGoneError extends Error {
+  constructor() {
+    super("instance was removed");
+  }
+}
+
+/** Longer than a full provisioning pass, whose Cloudflare calls time out after 8 seconds each. */
+export const INSTANCE_LEASE_MS = 2 * 60_000;
+
 export interface EnsuredEndpoint {
   readonly instance: InstanceRow;
   /**
@@ -51,7 +68,32 @@ export class Provisioner {
     return `${this.tunnelNamePrefix}-${instanceId}`;
   }
 
+  /**
+   * Run Cloudflare work on one instance while holding its lease, so setup and
+   * removal never overlap and neither leaves behind resources the other
+   * cannot see. The work gets the instance as it is once the lease is held.
+   */
+  async withLease<T>(instanceId: string, work: (instance: InstanceRow) => Promise<T>): Promise<T> {
+    if (!(await this.store.claimInstance(instanceId, this.now(), INSTANCE_LEASE_MS))) {
+      throw new InstanceBusyError();
+    }
+    try {
+      const instance = await this.store.getInstance(instanceId);
+      if (instance === null) {
+        throw new InstanceGoneError();
+      }
+      return await work(instance);
+    } finally {
+      await this.store.releaseInstance(instanceId);
+    }
+  }
+
+  /** Call while holding the instance's lease. */
   async ensureEndpoint(instance: InstanceRow, origin: Origin): Promise<EnsuredEndpoint> {
+    if (instance.state === "deleting") {
+      // Removal revoked it; creating resources now would only leak them.
+      throw new InstanceGoneError();
+    }
     let current = instance;
     let tunnelChanged = false;
 
@@ -82,27 +124,39 @@ export class Provisioner {
       };
     }
 
-    if (current.dns_record_id === null || tunnelChanged) {
-      const record = await this.pointHostnameAt(current, `${current.tunnel_id}.cfargotunnel.com`);
-      if (record.id !== current.dns_record_id) {
-        await this.store.setDnsRecord(current.id, record.id, this.now());
-        current = { ...current, dns_record_id: record.id };
-      }
+    // Compared with what the record was last pointed at, not with whether
+    // this call replaced the tunnel: a replacement that failed before
+    // updating DNS is only noticed by the retry this way.
+    const target = `${current.tunnel_id}.cfargotunnel.com`;
+    if (current.dns_record_id === null || current.dns_target !== target) {
+      const record = await this.pointHostnameAt(current, target);
+      await this.store.setDnsRecord(current.id, record.id, target, this.now());
+      // The hostname pointed at another tunnel, so the Frigate's token is for
+      // that one, even when this call did not create the new tunnel.
+      tunnelChanged = tunnelChanged || current.dns_target !== null;
+      current = { ...current, dns_record_id: record.id, dns_target: target };
     }
 
     return { instance: current, tunnelChanged };
   }
 
-  /** Delete the instance's Cloudflare resources, then the instance. */
+  /**
+   * Delete the instance's Cloudflare resources, then the instance. Call while
+   * holding its lease. Resources are also looked up by name, which finds any
+   * that an attempt created but did not live to record.
+   */
   async teardown(instance: InstanceRow): Promise<void> {
-    const recordId = instance.dns_record_id ?? (await this.cloudflare.findDnsRecord(instance.hostname))?.id;
-    if (recordId !== undefined) {
-      await this.cloudflare.deleteDnsRecord(recordId);
+    const found = await this.cloudflare.findDnsRecord(instance.hostname);
+    for (const recordId of new Set([instance.dns_record_id, found?.id])) {
+      if (recordId) {
+        await this.cloudflare.deleteDnsRecord(recordId);
+      }
     }
-    const tunnelId =
-      instance.tunnel_id ?? (await this.cloudflare.findTunnelByName(this.tunnelName(instance.id)))?.id;
-    if (tunnelId !== undefined) {
-      await this.cloudflare.deleteTunnel(tunnelId);
+    const named = await this.cloudflare.findTunnelByName(this.tunnelName(instance.id));
+    for (const tunnelId of new Set([instance.tunnel_id, named?.id])) {
+      if (tunnelId) {
+        await this.cloudflare.deleteTunnel(tunnelId);
+      }
     }
     await this.store.deleteInstance(instance.id);
   }

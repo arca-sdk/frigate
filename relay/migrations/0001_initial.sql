@@ -38,10 +38,16 @@ CREATE TABLE instances (
   -- retry adopts what an interrupted attempt created.
   tunnel_id TEXT,
   dns_record_id TEXT,
+  -- What the DNS record points at, so a retry after a replaced tunnel knows
+  -- the record still points at the old one.
+  dns_target TEXT,
   -- The origin the tunnel's ingress currently points at.
   configured_origin TEXT,
   -- provisioning, active or deleting
   state TEXT NOT NULL,
+  -- Lease held while Cloudflare resources are created or removed, so setup
+  -- and removal of one instance never overlap.
+  busy_until INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   last_sync_at INTEGER

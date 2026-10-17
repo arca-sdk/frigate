@@ -20,7 +20,7 @@ import { type RelayConfig, clerkFrontendApi } from "./config.ts";
 import { newInstanceId, newRequestId, newSecret, newUserCode, normalizeUserCode, sha256Hex } from "./crypto.ts";
 import { HttpError, empty, errorResponse, json, readJsonObject, requireString } from "./http.ts";
 import { parseOrigin } from "./origin.ts";
-import { Provisioner } from "./provisioning.ts";
+import { InstanceBusyError, InstanceGoneError, Provisioner } from "./provisioning.ts";
 import { type InstanceRow, type LinkRequestRow, Store, originOf } from "./store.ts";
 
 export const LINK_REQUEST_TTL_MS = 10 * 60_000;
@@ -69,17 +69,29 @@ function provisioner(deps: Dependencies): Provisioner {
   return new Provisioner(deps.store, deps.cloudflare, deps.config.tunnelNamePrefix, deps.now);
 }
 
+/** Delete a revoked instance's tunnel and hostname. False when it has to wait for maintenance. */
+async function tearDown(instanceId: string, deps: Dependencies): Promise<boolean> {
+  const provision = provisioner(deps);
+  try {
+    await provision.withLease(instanceId, (instance) => provision.teardown(instance));
+    return true;
+  } catch (error) {
+    if (error instanceof InstanceGoneError) {
+      return true;
+    }
+    // Busy means a setup is in flight; it records what it creates, and the
+    // scheduled maintenance removes it all once the lease is free.
+    if (!(error instanceof InstanceBusyError)) {
+      console.error("instance teardown failed", { instanceId, error: String(error) });
+    }
+    return false;
+  }
+}
+
 /** Remove an instance's access at once, then its tunnel and hostname. */
 async function removeInstance(instance: InstanceRow, deps: Dependencies): Promise<boolean> {
   await deps.store.markDeleting(instance.id, deps.now());
-  try {
-    await provisioner(deps).teardown({ ...instance, state: "deleting" });
-    return true;
-  } catch (error) {
-    // The scheduled maintenance retries instances left in "deleting".
-    console.error("instance teardown failed", { instanceId: instance.id, error: String(error) });
-    return false;
-  }
+  return tearDown(instance.id, deps);
 }
 
 const getInfo: Handler = async (request, _params, deps) =>
@@ -164,7 +176,13 @@ const pollLinkRequest: Handler = async (request, _params, deps) => {
   }
 
   try {
-    return json(await completeLink(row, deps));
+    // Read again now that the lease is held: a poll that finished in the
+    // meantime may have created the instance this row does not know about.
+    const claimed = await deps.store.findLinkRequestById(row.id);
+    if (claimed === null) {
+      throw new HttpError(400, "invalid_grant", "Unknown link request");
+    }
+    return json(await completeLink(claimed, deps));
   } catch (error) {
     await deps.store.releaseLinkRequest(row.id);
     if (error instanceof HttpError) {
@@ -175,16 +193,18 @@ const pollLinkRequest: Handler = async (request, _params, deps) => {
   }
 };
 
+const REMOVED = () => new HttpError(400, "access_denied", "The instance was removed from the account");
+
 async function completeLink(row: LinkRequestRow, deps: Dependencies) {
-  let instance = row.instance_id === null ? null : await deps.store.getInstance(row.instance_id);
-  if (instance === null) {
+  let instanceId = row.instance_id;
+  if (instanceId === null) {
     if (row.status === "completed") {
       // Removed from the account before this Frigate collected it.
-      throw new HttpError(400, "access_denied", "The instance was removed from the account");
+      throw REMOVED();
     }
     const id = newInstanceId();
     const now = deps.now();
-    instance = {
+    instanceId = await deps.store.createInstanceForLinkRequest(row.id, {
       id,
       user_id: row.user_id!,
       account_label: row.account_label,
@@ -196,25 +216,42 @@ async function completeLink(row: LinkRequestRow, deps: Dependencies) {
       origin_port: row.origin_port,
       tunnel_id: null,
       dns_record_id: null,
+      dns_target: null,
       configured_origin: null,
       state: "provisioning",
+      busy_until: null,
       created_at: now,
       updated_at: now,
       last_sync_at: null,
-    };
-    await deps.store.createInstanceForLinkRequest(row.id, instance);
-  }
-  if (instance.state === "deleting") {
-    throw new HttpError(400, "access_denied", "The instance was removed from the account");
+    });
+    if (instanceId === null) {
+      throw new HttpError(400, "invalid_grant", "Unknown link request");
+    }
   }
 
-  const { instance: ready } = await provisioner(deps).ensureEndpoint(instance, originOf(row));
-  const tunnelToken = await deps.cloudflare.getTunnelToken(ready.tunnel_id!);
+  const provision = provisioner(deps);
+  let provisioned;
+  try {
+    provisioned = await provision.withLease(instanceId, async (instance) => {
+      const { instance: ready } = await provision.ensureEndpoint(instance, originOf(row));
+      return { ready, tunnelToken: await deps.cloudflare.getTunnelToken(ready.tunnel_id!) };
+    });
+  } catch (error) {
+    if (error instanceof InstanceGoneError) {
+      throw REMOVED();
+    }
+    if (error instanceof InstanceBusyError) {
+      throw new HttpError(400, "slow_down", "Still setting up");
+    }
+    throw error;
+  }
+
+  const { ready, tunnelToken } = provisioned;
   // A repeated poll, after a response that never arrived, issues a fresh
   // secret; only the holder of the device code can ask for one.
   const secret = newSecret();
   if (!(await deps.store.activateInstance(ready.id, await sha256Hex(secret), deps.now()))) {
-    throw new HttpError(400, "access_denied", "The instance was removed from the account");
+    throw REMOVED();
   }
   await deps.store.completeLinkRequest(row.id);
   return {
@@ -261,14 +298,6 @@ const approveLinkRequest: Handler = async (request, params, deps) => {
   if (row.status !== "pending") {
     throw new HttpError(409, "already_decided", "This code was already used");
   }
-  const count = await deps.store.countInstancesForUser(identity.userId);
-  if (count >= deps.config.maxInstancesPerUser) {
-    throw new HttpError(
-      409,
-      "instance_limit_reached",
-      `Your account can link up to ${deps.config.maxInstancesPerUser} Frigate servers; remove one first`,
-    );
-  }
   let accountLabel: string | null = null;
   try {
     accountLabel = await deps.accounts.labelFor(identity.userId);
@@ -276,12 +305,19 @@ const approveLinkRequest: Handler = async (request, params, deps) => {
     // Only a display label; linking works without it.
     console.warn("account label lookup failed", { error: String(error) });
   }
-  const decided = await deps.store.decideLinkRequest(
+  const result = await deps.store.approveLinkRequest(
     row.id,
-    { status: "approved", userId: identity.userId, accountLabel },
+    { userId: identity.userId, accountLabel, limit: deps.config.maxInstancesPerUser },
     deps.now(),
   );
-  if (!decided) {
+  if (result === "limit_reached") {
+    throw new HttpError(
+      409,
+      "instance_limit_reached",
+      `Your account can link up to ${deps.config.maxInstancesPerUser} Frigate servers; remove one first`,
+    );
+  }
+  if (result === "already_decided") {
     throw new HttpError(409, "already_decided", "This code was already used");
   }
   return json({ status: "approved" });
@@ -290,7 +326,7 @@ const approveLinkRequest: Handler = async (request, params, deps) => {
 const denyLinkRequest: Handler = async (request, params, deps) => {
   const identity = await deps.users.authenticate(request);
   const row = await findDecidableLinkRequest(identity, params, deps);
-  if (!(await deps.store.decideLinkRequest(row.id, { status: "denied" }, deps.now()))) {
+  if (!(await deps.store.denyLinkRequest(row.id, deps.now()))) {
     throw new HttpError(409, "already_decided", "This code was already used");
   }
   return json({ status: "denied" });
@@ -313,14 +349,23 @@ const syncInstance: Handler = async (request, _params, deps) => {
   const name = typeof body.name === "string" ? cleanName(body.name) : instance.name;
   const includeToken = body.include_token === true;
 
+  const provision = provisioner(deps);
   let ensured;
   let tunnelToken: string | null = null;
   try {
-    ensured = await provisioner(deps).ensureEndpoint(instance, origin);
-    if (includeToken || ensured.tunnelChanged) {
-      tunnelToken = await deps.cloudflare.getTunnelToken(ensured.instance.tunnel_id!);
-    }
+    ({ ensured, tunnelToken } = await provision.withLease(instance.id, async (current) => {
+      const result = await provision.ensureEndpoint(current, origin);
+      const token =
+        includeToken || result.tunnelChanged ? await deps.cloudflare.getTunnelToken(result.instance.tunnel_id!) : null;
+      return { ensured: result, tunnelToken: token };
+    }));
   } catch (error) {
+    if (error instanceof InstanceGoneError) {
+      throw new HttpError(401, "invalid_instance_credentials", "This Frigate is no longer linked");
+    }
+    if (error instanceof InstanceBusyError) {
+      throw new HttpError(503, "busy", "This Frigate's tunnel is being changed; try again shortly");
+    }
     console.error("instance sync failed", { instanceId: instance.id, error: String(error) });
     throw new HttpError(502, "provisioning_failed", "Could not update the tunnel; try again later");
   }
@@ -442,11 +487,7 @@ export async function runMaintenance(deps: Dependencies): Promise<void> {
   }
   const deleting = await deps.store.listInstancesInState("deleting", now, 50);
   for (const instance of deleting) {
-    try {
-      await provisioner(deps).teardown(instance);
-    } catch (error) {
-      console.error("scheduled teardown failed", { instanceId: instance.id, error: String(error) });
-    }
+    await tearDown(instance.id, deps);
   }
   // Keep finished requests until well after expiry so a late poll still gets
   // a meaningful error rather than an unknown code.

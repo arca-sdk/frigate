@@ -34,16 +34,24 @@ export interface InstanceRow {
   readonly origin_port: number;
   readonly tunnel_id: string | null;
   readonly dns_record_id: string | null;
+  readonly dns_target: string | null;
   readonly configured_origin: string | null;
   readonly state: InstanceState;
+  readonly busy_until: number | null;
   readonly created_at: number;
   readonly updated_at: number;
   readonly last_sync_at: number | null;
 }
 
+export type ApprovalResult = "approved" | "already_decided" | "limit_reached";
+
 export function originOf(row: LinkRequestRow | InstanceRow): Origin {
   return { scheme: row.origin_scheme, host: row.origin_host, port: row.origin_port };
 }
+
+const INSTANCE_COLUMNS = `id, user_id, account_label, name, hostname, secret_hash,
+  origin_scheme, origin_host, origin_port, tunnel_id, dns_record_id, dns_target,
+  configured_origin, state, busy_until, created_at, updated_at, last_sync_at`;
 
 export class Store {
   constructor(private readonly db: D1Database) {}
@@ -75,6 +83,10 @@ export class Store {
       .run();
   }
 
+  findLinkRequestById(id: string): Promise<LinkRequestRow | null> {
+    return this.db.prepare("SELECT * FROM link_requests WHERE id = ?").bind(id).first<LinkRequestRow>();
+  }
+
   findLinkRequestByDeviceCodeHash(hash: string): Promise<LinkRequestRow | null> {
     return this.db
       .prepare("SELECT * FROM link_requests WHERE device_code_hash = ?")
@@ -89,24 +101,44 @@ export class Store {
       .first<LinkRequestRow>();
   }
 
-  /** Decide a pending request. False when it was already decided or expired. */
-  async decideLinkRequest(
+  /**
+   * Approve a pending request if the account has room for another instance.
+   *
+   * Approved requests that have not created their instance yet count against
+   * the limit too, and the check and the approval are one statement, so
+   * approving several codes at once cannot get past it.
+   */
+  async approveLinkRequest(
     id: string,
-    decision: { status: "approved"; userId: string; accountLabel: string | null } | { status: "denied" },
+    approval: { userId: string; accountLabel: string | null; limit: number },
     now: number,
-  ): Promise<boolean> {
+  ): Promise<ApprovalResult> {
     const result = await this.db
       .prepare(
-        `UPDATE link_requests SET status = ?, user_id = ?, account_label = ?
+        `UPDATE link_requests SET status = 'approved', user_id = ?, account_label = ?
+         WHERE id = ? AND status = 'pending' AND expires_at > ?
+           AND (SELECT COUNT(*) FROM instances WHERE user_id = ? AND state != 'deleting')
+             + (SELECT COUNT(*) FROM link_requests
+                WHERE user_id = ? AND status = 'approved' AND instance_id IS NULL AND expires_at > ?)
+             < ?`,
+      )
+      .bind(approval.userId, approval.accountLabel, id, now, approval.userId, approval.userId, now, approval.limit)
+      .run();
+    if (result.meta.changes === 1) {
+      return "approved";
+    }
+    const row = await this.findLinkRequestById(id);
+    return row === null || row.status !== "pending" || row.expires_at <= now ? "already_decided" : "limit_reached";
+  }
+
+  /** Decline a pending request. False when it was already decided or expired. */
+  async denyLinkRequest(id: string, now: number): Promise<boolean> {
+    const result = await this.db
+      .prepare(
+        `UPDATE link_requests SET status = 'denied'
          WHERE id = ? AND status = 'pending' AND expires_at > ?`,
       )
-      .bind(
-        decision.status,
-        decision.status === "approved" ? decision.userId : null,
-        decision.status === "approved" ? decision.accountLabel : null,
-        id,
-        now,
-      )
+      .bind(id, now)
       .run();
     return result.meta.changes === 1;
   }
@@ -147,15 +179,22 @@ export class Store {
     return result.meta.changes;
   }
 
-  /** Create the instance and remember it on the request in one transaction. */
-  async createInstanceForLinkRequest(linkRequestId: string, instance: InstanceRow): Promise<void> {
+  /**
+   * Create the instance for a request that has none yet, in one transaction.
+   * Returns the request's instance id, which is an earlier attempt's when one
+   * already assigned it.
+   */
+  async createInstanceForLinkRequest(linkRequestId: string, instance: InstanceRow): Promise<string | null> {
     await this.db.batch([
       this.db
+        .prepare("UPDATE link_requests SET instance_id = ? WHERE id = ? AND instance_id IS NULL")
+        .bind(instance.id, linkRequestId),
+      // Only inserted when the assignment above won.
+      this.db
         .prepare(
-          `INSERT INTO instances (id, user_id, account_label, name, hostname, secret_hash,
-             origin_scheme, origin_host, origin_port, tunnel_id, dns_record_id,
-             configured_origin, state, created_at, updated_at, last_sync_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO instances (${INSTANCE_COLUMNS})
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+           WHERE EXISTS (SELECT 1 FROM link_requests WHERE id = ? AND instance_id = ?)`,
         )
         .bind(
           instance.id,
@@ -169,16 +208,18 @@ export class Store {
           instance.origin_port,
           instance.tunnel_id,
           instance.dns_record_id,
+          instance.dns_target,
           instance.configured_origin,
           instance.state,
+          instance.busy_until,
           instance.created_at,
           instance.updated_at,
           instance.last_sync_at,
+          linkRequestId,
+          instance.id,
         ),
-      this.db
-        .prepare("UPDATE link_requests SET instance_id = ? WHERE id = ?")
-        .bind(instance.id, linkRequestId),
     ]);
+    return (await this.findLinkRequestById(linkRequestId))?.instance_id ?? null;
   }
 
   getInstance(id: string): Promise<InstanceRow | null> {
@@ -193,21 +234,28 @@ export class Store {
     return results;
   }
 
-  /** Instances that count against the user's limit. */
-  async countInstancesForUser(userId: string): Promise<number> {
-    const row = await this.db
-      .prepare("SELECT COUNT(*) AS count FROM instances WHERE user_id = ? AND state != 'deleting'")
-      .bind(userId)
-      .first<{ count: number }>();
-    return row?.count ?? 0;
-  }
-
   async listInstancesInState(state: InstanceState, createdBefore: number, limit: number): Promise<InstanceRow[]> {
     const { results } = await this.db
       .prepare("SELECT * FROM instances WHERE state = ? AND created_at < ? ORDER BY updated_at LIMIT ?")
       .bind(state, createdBefore, limit)
       .all<InstanceRow>();
     return results;
+  }
+
+  /** Take the instance's lease for Cloudflare work. False while someone else holds it. */
+  async claimInstance(id: string, now: number, leaseMs: number): Promise<boolean> {
+    const result = await this.db
+      .prepare(
+        `UPDATE instances SET busy_until = ?
+         WHERE id = ? AND (busy_until IS NULL OR busy_until <= ?)`,
+      )
+      .bind(now + leaseMs, id, now)
+      .run();
+    return result.meta.changes === 1;
+  }
+
+  async releaseInstance(id: string): Promise<void> {
+    await this.db.prepare("UPDATE instances SET busy_until = NULL WHERE id = ?").bind(id).run();
   }
 
   async setTunnel(id: string, tunnelId: string, now: number): Promise<void> {
@@ -228,10 +276,10 @@ export class Store {
       .run();
   }
 
-  async setDnsRecord(id: string, dnsRecordId: string, now: number): Promise<void> {
+  async setDnsRecord(id: string, dnsRecordId: string, target: string, now: number): Promise<void> {
     await this.db
-      .prepare("UPDATE instances SET dns_record_id = ?, updated_at = ? WHERE id = ?")
-      .bind(dnsRecordId, now, id)
+      .prepare("UPDATE instances SET dns_record_id = ?, dns_target = ?, updated_at = ? WHERE id = ?")
+      .bind(dnsRecordId, target, now, id)
       .run();
   }
 

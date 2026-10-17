@@ -38,9 +38,12 @@ Every 30 minutes Frigate checks `GET /v1/instance`; a 401 means the instance was
 and Frigate stops its connector.
 
 Each step records the Cloudflare resources it created before moving on, so a request that
-fails part way is resumed by the next poll or sync rather than duplicated. A scheduled job
-every 15 minutes finishes removals that failed part way and cleans up links that were
-approved but never collected.
+fails part way is resumed by the next poll or sync rather than duplicated. Setup and removal
+of one instance take a short lease on it, so they never overlap: a removal that finds a setup
+in progress revokes the instance's access at once and leaves its tunnel and hostname to the
+scheduled job, which runs every 15 minutes, finishes removals that failed part way, and
+cleans up links that were approved but never collected. Approved codes that have not been
+collected yet count against the account's instance limit.
 
 ## Trust model
 
@@ -138,9 +141,11 @@ Until every setting is present the API answers `503 relay_not_configured`.
 
 ### 4. Point Frigate at the relay
 
-Set `REMOTE_ACCESS_RELAY_URL` in `frigate/const.py` to the relay's URL before building the
-image, or set the `FRIGATE_REMOTE_ACCESS_RELAY_URL` environment variable on a Frigate
-container. Without either, Frigate shows Connect as unavailable and Tailscale still works.
+Set `REMOTE_ACCESS_RELAY_URL` in `frigate/const.py` to the relay's `https` URL before
+building the image, or set the `FRIGATE_REMOTE_ACCESS_RELAY_URL` environment variable on a
+Frigate container. Frigate ignores a plain `http` URL unless it points at the same machine,
+as with `wrangler dev`. Without a URL, Frigate shows Connect as unavailable and Tailscale
+still works.
 
 ## Operate
 
@@ -174,7 +179,7 @@ All bodies are JSON. Errors are `{"error": "<code>", "message": "<text>"}`.
 | `POST /v1/link-requests/:code/approve`   | signed-in user   | Approve; `instance_limit_reached` at the account limit                    |
 | `POST /v1/link-requests/:code/deny`      | signed-in user   | Decline                                                                  |
 | `GET /v1/instance`                       | Frigate (secret) | The instance; 401 once it was removed                                    |
-| `POST /v1/instance/sync`                 | Frigate (secret) | `{origin, name?, include_token?}` → repairs the tunnel, maybe a new token |
+| `POST /v1/instance/sync`                 | Frigate (secret) | `{origin, name?, include_token?}` → repairs the tunnel, maybe a new token; `503 busy` while another change is in progress |
 | `DELETE /v1/instance`                    | Frigate (secret) | Unlink and delete the tunnel and hostname                                |
 | `GET /v1/me/instances`                   | signed-in user   | The account's instances with online status                               |
 | `DELETE /v1/me/instances/:id`            | signed-in user   | Remove one                                                               |

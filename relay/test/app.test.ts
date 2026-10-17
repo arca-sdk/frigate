@@ -135,6 +135,69 @@ describe("linking", () => {
     expect((await poll(h, link.device_code)).status).toBe(200);
   });
 
+  it("counts approved codes against the limit before they are collected", async () => {
+    const h = harness();
+    const links = [await startLink(h), await startLink(h), await startLink(h)];
+    const approvals = [];
+    for (const link of links) {
+      approvals.push((await call(h, "POST", `/v1/link-requests/${link.user_code}/approve`, { auth: "user:alice" })).body);
+    }
+    expect(approvals).toEqual([
+      { status: "approved" },
+      { status: "approved" },
+      expect.objectContaining({ error: "instance_limit_reached" }),
+    ]);
+    expect((await poll(h, links[2]!.device_code)).body.error).toBe("authorization_pending");
+  });
+
+  it("creates one instance when two polls collect the same approval", async () => {
+    const h = harness();
+    const link = await startLink(h);
+    await call(h, "POST", `/v1/link-requests/${link.user_code}/approve`, { auth: "user:alice" });
+    const results = await Promise.all([poll(h, link.device_code), poll(h, link.device_code)]);
+    const succeeded = results.filter((result) => result.status === 200);
+    expect(succeeded.length).toBeGreaterThanOrEqual(1);
+    expect(new Set(succeeded.map((result) => result.body.instance_id)).size).toBe(1);
+    for (const result of results.filter((result) => result.status !== 200)) {
+      expect(result.body.error).toBe("slow_down");
+    }
+    // A poll that read the request before the other created the instance.
+    const retry = await poll(h, link.device_code);
+    expect(retry.body.instance_id).toBe(succeeded[0]!.body.instance_id);
+    expect(h.cloudflare.liveTunnels()).toHaveLength(1);
+    expect((await call(h, "GET", "/v1/me/instances", { auth: "user:alice" })).body.instances).toHaveLength(1);
+  });
+
+  it("keeps the first instance assigned to a request", async () => {
+    const h = harness();
+    const link = await startLink(h);
+    await call(h, "POST", `/v1/link-requests/${link.user_code}/approve`, { auth: "user:alice" });
+    const row = (await h.store.findLinkRequestByUserCode(link.user_code))!;
+    const candidate = (id: string) => ({
+      id,
+      user_id: "alice",
+      account_label: null,
+      name: "Garage",
+      hostname: `${id}.tunnels.example.net`,
+      secret_hash: null,
+      origin_scheme: "https" as const,
+      origin_host: "127.0.0.1",
+      origin_port: 8971,
+      tunnel_id: null,
+      dns_record_id: null,
+      dns_target: null,
+      configured_origin: null,
+      state: "provisioning" as const,
+      busy_until: null,
+      created_at: 1,
+      updated_at: 1,
+      last_sync_at: null,
+    });
+    expect(await h.store.createInstanceForLinkRequest(row.id, candidate("first"))).toBe("first");
+    expect(await h.store.createInstanceForLinkRequest(row.id, candidate("second"))).toBe("first");
+    expect(await h.store.getInstance("second")).toBeNull();
+  });
+
   it("stops at the per-account limit", async () => {
     const h = harness();
     await linkInstance(h);
@@ -313,6 +376,58 @@ describe("a linked instance", () => {
     expect([...h.cloudflare.records.values()]).toEqual([
       expect.objectContaining({ name: linked.hostname, content: `${replacement?.id}.cfargotunnel.com` }),
     ]);
+  });
+
+  it("repoints the hostname on the retry after a replacement failed part way", async () => {
+    const h = harness();
+    const linked = await linkInstance(h);
+    const [original] = h.cloudflare.liveTunnels();
+    await h.cloudflare.deleteTunnel(original!.id);
+
+    h.cloudflare.failNext("updateDnsRecordTarget");
+    const failed = await call(h, "POST", "/v1/instance/sync", { auth: linked.instance_secret, body: { origin: ORIGIN } });
+    expect(failed.status).toBe(502);
+
+    const retried = await call(h, "POST", "/v1/instance/sync", { auth: linked.instance_secret, body: { origin: ORIGIN } });
+    const [replacement] = h.cloudflare.liveTunnels();
+    expect(retried.body).toMatchObject({ tunnel_replaced: true, tunnel_token: replacement?.token });
+    expect([...h.cloudflare.records.values()]).toEqual([
+      expect.objectContaining({ name: linked.hostname, content: `${replacement?.id}.cfargotunnel.com` }),
+    ]);
+  });
+
+  it("finishes removal after a setup that was in flight", async () => {
+    const h = harness();
+    const linked = await linkInstance(h);
+    const [original] = h.cloudflare.liveTunnels();
+    await h.cloudflare.deleteTunnel(original!.id);
+
+    let removal: Awaited<ReturnType<typeof call>> | undefined;
+    h.cloudflare.onCreateTunnel = async () => {
+      removal = await call(h, "DELETE", `/v1/me/instances/${linked.instance_id}`, { auth: "user:alice" });
+    };
+    await call(h, "POST", "/v1/instance/sync", { auth: linked.instance_secret, body: { origin: ORIGIN } });
+    // The sync held the lease, so removal revoked access and left the rest.
+    expect(removal).toMatchObject({ status: 202, body: { status: "removing" } });
+    expect((await call(h, "GET", "/v1/instance", { auth: linked.instance_secret })).status).toBe(401);
+
+    h.advance(1);
+    await runMaintenance(h.deps);
+    expect(h.cloudflare.liveTunnels()).toEqual([]);
+    expect(h.cloudflare.records.size).toBe(0);
+    expect(await h.store.getInstance(linked.instance_id)).toBeNull();
+  });
+
+  it("removes resources an interrupted attempt created but never recorded", async () => {
+    const h = harness();
+    const linked = await linkInstance(h);
+    const stray = await h.cloudflare.createTunnel(`test-${linked.instance_id}-unused`);
+    await h.cloudflare.deleteTunnel(h.cloudflare.liveTunnels()[0]!.id);
+    // Same name as the instance's tunnel, as a crashed replacement leaves it.
+    h.cloudflare.tunnels.get(stray.id)!.name = `test-${linked.instance_id}`;
+
+    expect((await call(h, "DELETE", "/v1/instance", { auth: linked.instance_secret })).status).toBe(204);
+    expect(h.cloudflare.liveTunnels()).toEqual([]);
   });
 
   it("reports a Cloudflare failure during sync as retryable", async () => {
