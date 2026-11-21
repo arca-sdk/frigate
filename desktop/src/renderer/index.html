@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'"
+    />
+    <link rel="stylesheet" href="serverList.css" />
+  </head>
+  <body>
+    <main>
+      <h1 id="title"></h1>
+      <p id="empty" hidden></p>
+      <ul id="servers"></ul>
+
+      <section>
+        <h2 id="add-title"></h2>
+        <form id="add-form" novalidate>
+          <label for="add-url" id="add-url-label"></label>
+          <input
+            id="add-url"
+            name="url"
+            autocomplete="url"
+            spellcheck="false"
+          />
+          <p class="hint" id="add-url-hint"></p>
+
+          <label for="add-name" id="add-name-label"></label>
+          <input id="add-name" name="name" autocomplete="off" />
+
+          <p class="error" id="add-error" role="alert" hidden></p>
+          <div id="add-certificate"></div>
+
+          <button type="submit" id="add-submit" class="primary"></button>
+        </form>
+      </section>
+    </main>
+    <script src="serverList.js"></script>
+  </body>
+</html>

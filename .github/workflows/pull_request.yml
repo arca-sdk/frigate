@@ -99,6 +99,44 @@ jobs:
         run: npm test
         working-directory: ./relay
 
+  desktop_test:
+    name: Desktop - Test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.x
+      - run: npm ci
+        working-directory: ./desktop
+      # Electron downloads its binary on first use rather than at install
+      - name: Download Electron
+        run: node node_modules/electron/install.js
+        working-directory: ./desktop
+      - name: Type check
+        run: npm run typecheck
+        working-directory: ./desktop
+      - name: Unit tests
+        run: npm test
+        working-directory: ./desktop
+      # Ubuntu's AppArmor policy blocks the user namespaces Chromium's sandbox uses
+      - name: Allow Chromium's sandbox
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: End-to-end tests
+        run: xvfb-run --auto-servernum npm run e2e
+        working-directory: ./desktop
+      - name: Upload test artifacts
+        uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: desktop-test-results
+          path: desktop/test-results/
+          retention-days: 7
+
   python_checks:
     runs-on: ubuntu-latest
     name: Python Checks
