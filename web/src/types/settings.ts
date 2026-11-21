@@ -93,6 +93,10 @@ export const settingsViewGroups = [
     views: ["notifications"],
   },
   {
+    label: "remoteAccess",
+    views: ["remoteAccess"],
+  },
+  {
     label: "frigateplus",
     views: ["frigateplus"],
   },

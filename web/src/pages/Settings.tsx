@@ -48,6 +48,7 @@ import RolesView from "@/views/settings/RolesView";
 import UiSettingsView from "@/views/settings/UiSettingsView";
 import ProfilesView from "@/views/settings/ProfilesView";
 import FrigatePlusSettingsView from "@/views/settings/FrigatePlusSettingsView";
+import RemoteAccessSettingsView from "@/views/settings/RemoteAccessSettingsView";
 import MediaSyncSettingsView from "@/views/settings/MediaSyncSettingsView";
 import RegionGridSettingsView from "@/views/settings/RegionGridSettingsView";
 import Go2RtcStreamsSettingsView from "@/views/settings/Go2RtcStreamsSettingsView";
@@ -299,6 +300,7 @@ const SECTION_VIEWS = {
   users: UsersView,
   roles: RolesView,
   notifications: NotificationsSettingsPage,
+  remoteAccess: RemoteAccessSettingsView,
   frigateplus: FrigatePlusSettingsView,
   mediaSync: MediaSyncSettingsView,
   regionGrid: RegionGridSettingsView,

@@ -91,6 +91,15 @@ _KINDS = (
         batch_repeats=True,
         keep_latest=100,
     ),
+    # the relay no longer accepts this Frigate, usually because the account
+    # owner removed it, so its remote address stopped working
+    NoticeKind(
+        "remote_access_revoked",
+        NoticeSeverity.warning,
+        "system",
+        link="/settings?page=remoteAccess",
+        counts_repeats=False,
+    ),
     # one row per release, so muting it lasts until the next release
     NoticeKind(
         "update_available",

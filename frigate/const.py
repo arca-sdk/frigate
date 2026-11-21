@@ -20,6 +20,14 @@ REPLAY_DIR = os.path.join(CLIPS_DIR, "replay")
 PLUS_ENV_VAR = "PLUS_API_KEY"
 PLUS_API_HOST = "https://api.frigate.video"
 
+# Remote access keeps its credentials and the Tailscale node's identity here
+REMOTE_ACCESS_DIR = f"{CONFIG_DIR}/.remote_access"
+REMOTE_ACCESS_RUNTIME_DIR = "/tmp/remote-access"
+# The relay that links this Frigate to an account; see relay/README.md. Empty
+# leaves the Connect route unavailable unless the environment variable is set.
+REMOTE_ACCESS_RELAY_URL = ""
+REMOTE_ACCESS_RELAY_URL_ENV_VAR = "FRIGATE_REMOTE_ACCESS_RELAY_URL"
+
 SHM_FRAMES_VAR = "SHM_MAX_FRAMES"
 
 REDACTED_CREDENTIAL_SENTINEL = "__FRIGATE_SAVED_CREDENTIAL__"

@@ -73,6 +73,16 @@ ARG TARGETARCH
 RUN --mount=type=bind,source=docker/main/install_tempio.sh,target=/deps/install_tempio.sh \
     /deps/install_tempio.sh
 
+FROM wget AS cloudflared
+ARG TARGETARCH
+RUN --mount=type=bind,source=docker/main/install_cloudflared.sh,target=/deps/install_cloudflared.sh \
+    /deps/install_cloudflared.sh
+
+FROM wget AS tailscale
+ARG TARGETARCH
+RUN --mount=type=bind,source=docker/main/install_tailscale.sh,target=/deps/install_tailscale.sh \
+    /deps/install_tailscale.sh
+
 ####
 #
 # OpenVino Support
@@ -213,6 +223,8 @@ COPY --from=intel-media-driver /rootfs/ /
 COPY --from=go2rtc /rootfs/ /
 COPY --from=libusb-build /usr/local/lib /usr/local/lib
 COPY --from=tempio /rootfs/ /
+COPY --from=cloudflared /rootfs/ /
+COPY --from=tailscale /rootfs/ /
 COPY --from=s6-overlay /rootfs/ /
 COPY --from=models /rootfs/ /
 COPY docker/main/rootfs/ /
@@ -259,7 +271,7 @@ ENV AUTOGRAPH_VERBOSITY=0
 ENV GLOG_minloglevel=3
 ENV GLOG_logtostderr=0
 
-ENV PATH="/usr/local/go2rtc/bin:/usr/local/tempio/bin:/usr/local/nginx/sbin:${PATH}"
+ENV PATH="/usr/local/go2rtc/bin:/usr/local/tempio/bin:/usr/local/nginx/sbin:/usr/local/cloudflared/bin:/usr/local/tailscale/bin:${PATH}"
 
 # Install dependencies
 RUN --mount=type=bind,source=docker/main/install_deps.sh,target=/deps/install_deps.sh \

@@ -117,6 +117,7 @@ const sidebars: SidebarsConfig = {
         items: [
           "configuration/authentication",
           "configuration/notifications",
+          "configuration/remote_access",
           "configuration/profiles",
           "configuration/go2rtc",
           "configuration/ffmpeg_presets",

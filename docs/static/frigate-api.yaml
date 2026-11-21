@@ -4401,6 +4401,162 @@ paths:
       security:
         - frigateAdminAuth: []
       x-required-role: admin
+  /remote_access:
+    get:
+      tags:
+        - Remote Access
+      summary: Get Remote Access
+      description: |-
+        **Access:** Admin role required.
+
+        Get the state of the Connect and Tailscale routes.
+
+        Returns:
+            Both routes' state, and the auth settings remote access depends on
+      operationId: get_remote_access_remote_access_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+      security:
+        - frigateAdminAuth: []
+      x-required-role: admin
+  /remote_access/connect/link:
+    post:
+      tags:
+        - Remote Access
+      summary: Start Connect Link
+      description: |-
+        **Access:** Admin role required.
+
+        Ask the relay for a code that links this Frigate to an account.
+
+        Frigate polls the relay until the code is approved there, then starts
+        the tunnel.
+
+        Args:
+            body: The name to list this Frigate under on the account
+
+        Returns:
+            The state, with the code and the page to approve it on
+      operationId: start_connect_link_remote_access_connect_link_post
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RemoteAccessLinkBody'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+      security:
+        - frigateAdminAuth: []
+      x-required-role: admin
+    delete:
+      tags:
+        - Remote Access
+      summary: Cancel Connect Link
+      description: |-
+        **Access:** Admin role required.
+
+        Stop waiting for a link code to be approved.
+      operationId: cancel_connect_link_remote_access_connect_link_delete
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+      security:
+        - frigateAdminAuth: []
+      x-required-role: admin
+  /remote_access/connect:
+    delete:
+      tags:
+        - Remote Access
+      summary: Unlink Connect
+      description: |-
+        **Access:** Admin role required.
+
+        Stop the tunnel and remove this Frigate from its account.
+      operationId: unlink_connect_remote_access_connect_delete
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+      security:
+        - frigateAdminAuth: []
+      x-required-role: admin
+  /remote_access/tailscale/enable:
+    post:
+      tags:
+        - Remote Access
+      summary: Enable Tailscale
+      description: |-
+        **Access:** Admin role required.
+
+        Start the Tailscale node, signing in if needed, and serve Frigate on it.
+      operationId: enable_tailscale_remote_access_tailscale_enable_post
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+      security:
+        - frigateAdminAuth: []
+      x-required-role: admin
+  /remote_access/tailscale/disable:
+    post:
+      tags:
+        - Remote Access
+      summary: Disable Tailscale
+      description: |-
+        **Access:** Admin role required.
+
+        Stop serving Frigate on the tailnet, keeping the node signed in.
+      operationId: disable_tailscale_remote_access_tailscale_disable_post
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+      security:
+        - frigateAdminAuth: []
+      x-required-role: admin
+  /remote_access/tailscale/logout:
+    post:
+      tags:
+        - Remote Access
+      summary: Logout Tailscale
+      description: |-
+        **Access:** Admin role required.
+
+        Sign the node out of the tailnet and turn Tailscale off.
+      operationId: logout_tailscale_remote_access_tailscale_logout_post
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+      security:
+        - frigateAdminAuth: []
+      x-required-role: admin
   /events:
     get:
       tags:
@@ -9401,6 +9557,16 @@ components:
         - thumbnails
         - snapshot
       title: RegenerateDescriptionEnum
+    RemoteAccessLinkBody:
+      properties:
+        name:
+          anyOf:
+            - type: string
+              maxLength: 256
+            - type: 'null'
+          title: Name
+      type: object
+      title: RemoteAccessLinkBody
     RenameFaceBody:
       properties:
         new_name:

@@ -385,6 +385,12 @@ This can be used for example to access Frigate via a Tailscale agent (https), by
 tailscale serve --https=443 --bg --set-path /frigate http://localhost:5000/frigate
 ```
 
+:::tip
+
+Frigate can also join your tailnet itself and share its authenticated port with Tailscale Serve, with no host setup. See [Remote Access](../remote_access.md#tailscale).
+
+:::
+
 ## Custom Dependencies
 
 ### Custom ffmpeg build

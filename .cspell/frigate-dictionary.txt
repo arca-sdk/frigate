@@ -330,3 +330,8 @@ yolonas
 yolox
 zeep
 zerolatency
+cfargotunnel
+cloudflared
+tailnet
+tailscaled
+userspace
