@@ -1,0 +1,23 @@
+{
+  "name": "frigate-desktop",
+  "productName": "Frigate",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Desktop app that opens Frigate servers in their own windows",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "node build.mjs",
+    "start": "npm run build && electron .",
+    "typecheck": "tsc",
+    "test": "vitest run",
+    "e2e": "npm run build && playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "@types/node": "24.19.2",
+    "electron": "44.9.0",
+    "esbuild": "0.28.2",
+    "typescript": "6.0.3",
+    "vitest": "5.0.5"
+  }
+}
